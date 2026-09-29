@@ -1,0 +1,304 @@
+// makesPDF language server for Zed.
+//
+// Zed's extension API has no command palette, so this server is the whole
+// user-facing surface: it offers code actions on Markdown documents and runs
+// their commands. Export posts the current buffer to makesPDF.com and writes
+// the PDF next to the source file; validate reports accessibility issues.
+//
+// The server does no network or disk work until a command is executed.
+
+import { writeFile } from "node:fs/promises";
+
+import {
+  CodeActionKind,
+  createConnection,
+  DidChangeConfigurationNotification,
+  type ExecuteCommandParams,
+  type InitializeParams,
+  type InitializeResult,
+  LogMessageNotification,
+  MessageType,
+  ProposedFeatures,
+  TextDocuments,
+  TextDocumentSyncKind,
+} from "vscode-languageserver/node.js";
+import { TextDocument } from "vscode-languageserver-textdocument";
+
+import {
+  apiUrl,
+  classifyApiFailure,
+  connectionFailureMessage,
+  formatValidateSummary,
+  markdownBody,
+  optionsFromSettings,
+  requestHeaders,
+  RENDER_PATH,
+  savedMessage,
+  VALIDATE_PATH,
+  type ValidateResult,
+} from "./api.ts";
+import { COMMAND_EXPORT, COMMAND_VALIDATE, SETTINGS_SECTION } from "./commands.ts";
+import { buildCodeActions } from "./code-actions.ts";
+import {
+  buildProblemContext,
+  problemReportMessage,
+  sendFeedback,
+  type RenderFailureFacts,
+} from "./feedback.ts";
+import { isFileUri, pdfTarget } from "./paths.ts";
+import { DEFAULT_SETTINGS, mergeSettings, type MakesPdfSettings } from "./settings.ts";
+import { SERVER_VERSION } from "./version.ts";
+
+const REPORT_PROBLEM = "Report problem";
+const ISSUES_URL = "https://github.com/makesPDF/makespdf-zed-extension/issues";
+const REQUEST_TIMEOUT_MS = 120_000;
+
+const connection = createConnection(ProposedFeatures.all);
+const documents = new TextDocuments<TextDocument>(TextDocument);
+
+let settings: MakesPdfSettings = { ...DEFAULT_SETTINGS };
+let supportsPull = false;
+/** The anonymous-render tip is surfaced once per server (Zed session). */
+let anonymousTipShown = false;
+
+connection.onInitialize((params: InitializeParams): InitializeResult => {
+  supportsPull = params.capabilities?.workspace?.configuration === true;
+  return {
+    capabilities: {
+      textDocumentSync: TextDocumentSyncKind.Incremental,
+      codeActionProvider: { codeActionKinds: [CodeActionKind.Source] },
+      executeCommandProvider: { commands: [COMMAND_EXPORT, COMMAND_VALIDATE] },
+    },
+  };
+});
+
+connection.onInitialized(async () => {
+  if (!supportsPull) return;
+  try {
+    await connection.client.register(DidChangeConfigurationNotification.type, undefined);
+  } catch {
+    // Client lacks dynamic registration — settings then arrive via push only.
+  }
+  await pullSettings();
+});
+
+connection.onDidChangeConfiguration(async (params) => {
+  const pushed = (params.settings ?? {}) as Record<string, unknown>;
+  settings = mergeSettings(pushed[SETTINGS_SECTION] ?? pushed);
+  await pullSettings();
+});
+
+async function pullSettings(): Promise<void> {
+  if (!supportsPull) return;
+  try {
+    settings = mergeSettings(await connection.workspace.getConfiguration(SETTINGS_SECTION));
+  } catch (error) {
+    connection.console.warn(`makesPDF: could not read settings: ${String(error)}`);
+  }
+}
+
+connection.onCodeAction((params) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) return [];
+  return buildCodeActions(document.uri);
+});
+
+connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
+  try {
+    const uri = firstStringArgument(params.arguments);
+    if (!uri) {
+      await connection.window.showErrorMessage("makesPDF: missing document URI.");
+      return;
+    }
+    if (params.command === COMMAND_EXPORT) {
+      await exportToPdf(uri);
+    } else if (params.command === COMMAND_VALIDATE) {
+      await validateAccessibility(uri);
+    }
+  } catch (error) {
+    await connection.window.showErrorMessage(
+      `makesPDF: unexpected error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+});
+
+function firstStringArgument(args: ExecuteCommandParams["arguments"]): string | undefined {
+  const first = args?.[0];
+  return typeof first === "string" ? first : undefined;
+}
+
+/** POST the current buffer to /api/v1/md and write the bytes next to the file. */
+async function exportToPdf(uri: string): Promise<void> {
+  const document = documents.get(uri);
+  if (!document) {
+    await connection.window.showErrorMessage("makesPDF: this document is not open in the editor.");
+    return;
+  }
+  if (!isFileUri(uri)) {
+    await connection.window.showErrorMessage("makesPDF: only local files can be exported.");
+    return;
+  }
+
+  const markdown = document.getText();
+  if (!markdown.trim()) {
+    await connection.window.showWarningMessage("makesPDF: document is empty.");
+    return;
+  }
+
+  const { title, pdfPath } = pdfTarget(uri);
+  const options = optionsFromSettings(settings, title);
+  // Fingerprints for "Report problem": sizes and settings, never the text or
+  // the file name. The failure's status and code are added below.
+  const facts: RenderFailureFacts = {
+    pageSize: options.pageSize,
+    fontFamily: options.fontFamily,
+    fontSize: options.fontSize,
+    inputBytes: Buffer.byteLength(markdown),
+  };
+
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(settings.serviceUrl, RENDER_PATH), {
+      method: "POST",
+      headers: requestHeaders(SERVER_VERSION, settings.apiToken),
+      body: markdownBody(markdown, options),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    await reportExportProblem(connectionFailureMessage(settings.serviceUrl, error), facts);
+    return;
+  }
+
+  if (!response.ok) {
+    facts.httpStatus = response.status;
+    const failure = classifyApiFailure({
+      status: response.status,
+      apiToken: settings.apiToken,
+      serviceUrl: settings.serviceUrl,
+      body: await readJsonBody(response),
+    });
+    facts.errorCode = failure.errorCode;
+    await reportExportProblem(failure.message, facts);
+    return;
+  }
+
+  const bytes = Buffer.from(await response.arrayBuffer());
+  await writeFile(pdfPath, bytes);
+  await connection.window.showInformationMessage(
+    savedMessage(pdfPath, response.headers.get("X-Pages"), response.headers.get("X-Render-Ms")),
+  );
+
+  // Surface the server's upsell hint once per session, anonymous renders only.
+  const tip = settings.apiToken ? null : response.headers.get("X-MakesPDF-Tip");
+  if (tip && !anonymousTipShown) {
+    anonymousTipShown = true;
+    await connection.window.showInformationMessage(`makesPDF: ${tip}`);
+  }
+}
+
+/** POST the current buffer to /api/v1/md/validate and report the issues. */
+async function validateAccessibility(uri: string): Promise<void> {
+  const document = documents.get(uri);
+  if (!document) {
+    await connection.window.showErrorMessage("makesPDF: this document is not open in the editor.");
+    return;
+  }
+
+  const markdown = document.getText();
+  if (!markdown.trim()) {
+    await connection.window.showWarningMessage("makesPDF: document is empty.");
+    return;
+  }
+
+  const options = optionsFromSettings(settings, pdfTarget(uri).title);
+
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(settings.serviceUrl, VALIDATE_PATH), {
+      method: "POST",
+      headers: requestHeaders(SERVER_VERSION, settings.apiToken),
+      body: markdownBody(markdown, options),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    await connection.window.showErrorMessage(connectionFailureMessage(settings.serviceUrl, error));
+    return;
+  }
+
+  if (!response.ok) {
+    const failure = classifyApiFailure({
+      status: response.status,
+      apiToken: settings.apiToken,
+      serviceUrl: settings.serviceUrl,
+      body: await readJsonBody(response),
+    });
+    await connection.window.showErrorMessage(failure.message);
+    return;
+  }
+
+  const result = (await readJsonBody(response)) as ValidateResult;
+  await connection.window.showInformationMessage(
+    `makesPDF: ${formatValidateSummary(result)}`,
+  );
+
+  for (const issue of Array.isArray(result.issues) ? result.issues : []) {
+    const type =
+      issue.severity === "error"
+        ? MessageType.Error
+        : issue.severity === "warning"
+          ? MessageType.Warning
+          : MessageType.Info;
+    const where = issue.path ? ` at ${issue.path}` : "";
+    await connection.sendNotification(LogMessageNotification.type, {
+      type,
+      message: `makesPDF: ${issue.rule ?? "issue"}${where}: ${issue.message ?? ""}`,
+    });
+  }
+}
+
+/**
+ * Show a failed export, offering "Report problem". Picking it POSTs the
+ * fingerprints to /api/v1/feedback — never the document or the server's
+ * error text, which can quote request content.
+ */
+async function reportExportProblem(
+  message: string,
+  facts: RenderFailureFacts,
+): Promise<void> {
+  const choice = await connection.window.showErrorMessage(message, {
+    title: REPORT_PROBLEM,
+  });
+  if (choice?.title !== REPORT_PROBLEM) return;
+
+  const result = await sendFeedback({
+    serviceUrl: settings.serviceUrl,
+    version: SERVER_VERSION,
+    apiToken: settings.apiToken,
+    kind: "problem",
+    message: problemReportMessage(facts),
+    context: buildProblemContext(facts),
+  });
+
+  if (result.status === "sent") {
+    await connection.window.showInformationMessage("makesPDF: thanks, feedback sent.");
+  } else if (result.status === "rate-limited") {
+    await connection.window.showWarningMessage(
+      "makesPDF: too many feedback messages, try again later.",
+    );
+  } else {
+    await connection.window.showErrorMessage(
+      `makesPDF: could not send feedback: ${result.error}. You can open an issue at ${ISSUES_URL}.`,
+    );
+  }
+}
+
+async function readJsonBody(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return {};
+  }
+}
+
+documents.listen(connection);
+connection.listen();
