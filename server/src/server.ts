@@ -19,6 +19,7 @@ import {
   LogMessageNotification,
   MessageType,
   ProposedFeatures,
+  ShowMessageNotification,
   TextDocuments,
   TextDocumentSyncKind,
 } from "vscode-languageserver/node.js";
@@ -60,6 +61,25 @@ let settings: MakesPdfSettings = { ...DEFAULT_SETTINGS };
 let supportsPull = false;
 /** The anonymous-render tip is surfaced once per server (Zed session). */
 let anonymousTipShown = false;
+
+// Plain `window/showMessage` notifications for outcomes with nothing to click.
+// (`connection.window.showInformationMessage` would send a showMessageRequest,
+// which the task reserves for the "Report problem" action.)
+function showMessage(type: MessageType, message: string): void {
+  void connection.sendNotification(ShowMessageNotification.type, { type, message });
+}
+
+function showInfo(message: string): void {
+  showMessage(MessageType.Info, message);
+}
+
+function showWarning(message: string): void {
+  showMessage(MessageType.Warning, message);
+}
+
+function showError(message: string): void {
+  showMessage(MessageType.Error, message);
+}
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
   supportsPull = params.capabilities?.workspace?.configuration === true;
@@ -107,7 +127,7 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
   try {
     const uri = firstStringArgument(params.arguments);
     if (!uri) {
-      await connection.window.showErrorMessage("makesPDF: missing document URI.");
+      showError("makesPDF: missing document URI.");
       return;
     }
     if (params.command === COMMAND_EXPORT) {
@@ -116,7 +136,7 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
       await validateAccessibility(uri);
     }
   } catch (error) {
-    await connection.window.showErrorMessage(
+    showError(
       `makesPDF: unexpected error: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
@@ -131,17 +151,17 @@ function firstStringArgument(args: ExecuteCommandParams["arguments"]): string | 
 async function exportToPdf(uri: string): Promise<void> {
   const document = documents.get(uri);
   if (!document) {
-    await connection.window.showErrorMessage("makesPDF: this document is not open in the editor.");
+    showError("makesPDF: this document is not open in the editor.");
     return;
   }
   if (!isFileUri(uri)) {
-    await connection.window.showErrorMessage("makesPDF: only local files can be exported.");
+    showError("makesPDF: only local files can be exported.");
     return;
   }
 
   const markdown = document.getText();
   if (!markdown.trim()) {
-    await connection.window.showWarningMessage("makesPDF: document is empty.");
+    showWarning("makesPDF: document is empty.");
     return;
   }
 
@@ -184,7 +204,7 @@ async function exportToPdf(uri: string): Promise<void> {
 
   const bytes = Buffer.from(await response.arrayBuffer());
   await writeFile(pdfPath, bytes);
-  await connection.window.showInformationMessage(
+  showInfo(
     savedMessage(pdfPath, response.headers.get("X-Pages"), response.headers.get("X-Render-Ms")),
   );
 
@@ -192,7 +212,7 @@ async function exportToPdf(uri: string): Promise<void> {
   const tip = settings.apiToken ? null : response.headers.get("X-MakesPDF-Tip");
   if (tip && !anonymousTipShown) {
     anonymousTipShown = true;
-    await connection.window.showInformationMessage(`makesPDF: ${tip}`);
+    showInfo(`makesPDF: ${tip}`);
   }
 }
 
@@ -200,13 +220,17 @@ async function exportToPdf(uri: string): Promise<void> {
 async function validateAccessibility(uri: string): Promise<void> {
   const document = documents.get(uri);
   if (!document) {
-    await connection.window.showErrorMessage("makesPDF: this document is not open in the editor.");
+    showError("makesPDF: this document is not open in the editor.");
+    return;
+  }
+  if (!isFileUri(uri)) {
+    showError("makesPDF: only local files can be validated.");
     return;
   }
 
   const markdown = document.getText();
   if (!markdown.trim()) {
-    await connection.window.showWarningMessage("makesPDF: document is empty.");
+    showWarning("makesPDF: document is empty.");
     return;
   }
 
@@ -221,7 +245,7 @@ async function validateAccessibility(uri: string): Promise<void> {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
-    await connection.window.showErrorMessage(connectionFailureMessage(settings.serviceUrl, error));
+    showError(connectionFailureMessage(settings.serviceUrl, error));
     return;
   }
 
@@ -232,14 +256,12 @@ async function validateAccessibility(uri: string): Promise<void> {
       serviceUrl: settings.serviceUrl,
       body: await readJsonBody(response),
     });
-    await connection.window.showErrorMessage(failure.message);
+    showError(failure.message);
     return;
   }
 
   const result = (await readJsonBody(response)) as ValidateResult;
-  await connection.window.showInformationMessage(
-    `makesPDF: ${formatValidateSummary(result)}`,
-  );
+  showInfo(`makesPDF: ${formatValidateSummary(result)}`);
 
   for (const issue of Array.isArray(result.issues) ? result.issues : []) {
     const type =
@@ -280,13 +302,11 @@ async function reportExportProblem(
   });
 
   if (result.status === "sent") {
-    await connection.window.showInformationMessage("makesPDF: thanks, feedback sent.");
+    showInfo("makesPDF: thanks, feedback sent.");
   } else if (result.status === "rate-limited") {
-    await connection.window.showWarningMessage(
-      "makesPDF: too many feedback messages, try again later.",
-    );
+    showWarning("makesPDF: too many feedback messages, try again later.");
   } else {
-    await connection.window.showErrorMessage(
+    showError(
       `makesPDF: could not send feedback: ${result.error}. You can open an issue at ${ISSUES_URL}.`,
     );
   }

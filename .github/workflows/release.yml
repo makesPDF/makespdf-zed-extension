@@ -1,0 +1,50 @@
+name: Release
+
+# Publishes @makespdf/zed-language-server to npm. Triggered by pushing a tag
+# like v0.1.0; the package version is taken from the tag.
+#
+# Uses npm trusted publishing: the publish token is exchanged for this
+# workflow's OIDC identity at publish time. There is no NPM_TOKEN secret, and
+# no long-lived token should be added — trusted publishing is scoped to this
+# repository and workflow file (`release.yml`).
+#
+# Nothing else ships from this workflow. The Zed extension itself is listed in
+# zed-industries/extensions by a human PR; that is out of scope here.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - run: npm ci
+
+      - name: Set the package version from the tag
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
+
+      - name: Verify the package (typecheck, unit, integration)
+        run: npm test
+
+      - name: Publish with provenance
+        run: npm publish
+        env:
+          NPM_CONFIG_PROVENANCE: "true"
