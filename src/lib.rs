@@ -1,12 +1,19 @@
+use std::env;
+
 use zed_extension_api::{self as zed, settings::LspSettings, LanguageServerId, Result};
 
 /// The npm package that holds the makesPDF language server.
 const NPM_PACKAGE: &str = "@makespdf/zed-language-server";
 
-/// Entry point of the server inside the installed npm package. This is a path
-/// relative to the extension's working directory, where Zed installs the
-/// package (see `npm_install_package`).
+/// Entry point of the server inside the installed npm package, relative to the
+/// extension's working directory, where Zed installs the package (see
+/// `npm_install_package`).
 const SERVER_ENTRY: &str = "node_modules/@makespdf/zed-language-server/dist/server.js";
+
+/// Dev override: an absolute path to a locally built `server/dist/server.js`.
+/// When set in the shell environment Zed inherits, it replaces the npm package,
+/// so the sidecar can be used before it is published.
+const DEV_SERVER_ENV: &str = "MAKESPDF_ZED_SERVER_JS";
 
 struct MakesPdfExtension;
 
@@ -38,7 +45,28 @@ impl MakesPdfExtension {
             }
         }
 
-        Ok(SERVER_ENTRY.to_string())
+        if std::fs::metadata(SERVER_ENTRY).is_err() {
+            return Err(format!(
+                "the installed {NPM_PACKAGE} package does not contain {SERVER_ENTRY}"
+            ));
+        }
+
+        Self::entry_path()
+    }
+
+    /// The installed entry point as an absolute path.
+    ///
+    /// The language server process runs with the project root as its working
+    /// directory (`lsp_store.rs` passes the worktree path to
+    /// `LanguageServer::new`, which sets `current_dir`), and Zed resolves only
+    /// `command.command` against the extension directory — never arguments.
+    /// The relative `SERVER_ENTRY` must therefore be joined with this
+    /// extension's working directory (its WASI cwd), exactly as the official
+    /// `html` extension does with `env::current_dir`.
+    fn entry_path() -> Result<String> {
+        let directory = env::current_dir()
+            .map_err(|error| format!("could not read the extension directory: {error}"))?;
+        Ok(directory.join(SERVER_ENTRY).to_string_lossy().into_owned())
     }
 }
 
@@ -50,12 +78,26 @@ impl zed::Extension for MakesPdfExtension {
     fn language_server_command(
         &mut self,
         language_server_id: &LanguageServerId,
-        _worktree: &zed::Worktree,
+        worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
         zed::set_language_server_installation_status(
             language_server_id,
             &zed::LanguageServerInstallationStatus::CheckingForUpdate,
         );
+
+        // Dev override: run a locally built server instead of the npm package.
+        if let Some(path) = worktree
+            .shell_env()
+            .iter()
+            .find(|(key, _)| key == DEV_SERVER_ENV)
+            .map(|(_, value)| value.clone())
+        {
+            return Ok(zed::Command {
+                command: zed::node_binary_path()?,
+                args: vec![path, "--stdio".to_string()],
+                env: Default::default(),
+            });
+        }
 
         let server_entry = Self::server_entry(language_server_id)?;
 

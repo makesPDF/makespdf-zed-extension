@@ -42,7 +42,7 @@ test("each invalid field falls back individually", () => {
       apiToken: 42,
       pageSize: "A0",
       fontFamily: "ComicSans",
-      fontSize: 10.5,
+      fontSize: 25,
       margins: [1, 2, 3],
     }),
     DEFAULT_SETTINGS,
@@ -52,8 +52,11 @@ test("each invalid field falls back individually", () => {
 test("font size is bounded to 6..24 like the server schema", () => {
   assert.equal(mergeSettings({ fontSize: 6 }).fontSize, 6);
   assert.equal(mergeSettings({ fontSize: 24 }).fontSize, 24);
+  // The server schema accepts any number in range, never just integers.
+  assert.equal(mergeSettings({ fontSize: 10.5 }).fontSize, 10.5);
   assert.equal(mergeSettings({ fontSize: 5 }).fontSize, 10);
   assert.equal(mergeSettings({ fontSize: 25 }).fontSize, 10);
+  assert.equal(mergeSettings({ fontSize: Number.NaN }).fontSize, 10);
 });
 
 test("margins must be four non-negative numbers", () => {

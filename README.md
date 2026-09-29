@@ -74,6 +74,8 @@ Your Markdown crosses the network only when you run **Export to PDF** or **Valid
 
 Anonymous renders are not persisted to an account; named renders (with an API key) are stored so you can re-download them. See the [privacy policy](https://makespdf.com/legal/privacy).
 
+**Local images are not embedded in v1.** The service can fetch `http(s)` URLs and `data:` URIs only, so an image referenced by a local relative path (`![diagram](diagram.png)`) is left as a plain reference and will be missing from the PDF. Host it somewhere reachable or inline it as a `data:` URI if it must appear.
+
 ## Development
 
 Layout:
@@ -92,14 +94,14 @@ npm test          # typecheck + unit tests + the stdio LSP integration test
 npm run build     # bundle to server/dist/server.js
 ```
 
-To try it in Zed before the package is published:
+To try it in Zed before the package is published, launch Zed from a shell with the dev override set:
 
 ```sh
 # from the repository root
-npm install ./server
+MAKESPDF_ZED_SERVER_JS="$PWD/server/dist/server.js" zed
 ```
 
-Then run `zed: install dev extension` from the command palette and pick this repository. The extension installs the sidecar from npm once it is published; until then the local `node_modules/@makespdf/zed-language-server` built above is what runs.
+Then run `zed: install dev extension` from the command palette and pick this repository. Without the override, the extension installs `@makespdf/zed-language-server` into its own work directory with `npm_install_package` and updates it when a new version is published — that is the normal path, and `MAKESPDF_ZED_SERVER_JS` (an absolute path to a built `server/dist/server.js`) replaces it for development.
 
 The npm package is released by pushing a `vX.Y.Z` tag (`.github/workflows/release.yml`, npm trusted publishing with provenance); publishing is out of scope for this repository's day-to-day changes.
 

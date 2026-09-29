@@ -36,9 +36,9 @@ function isOneOf<T extends string>(
   return typeof value === "string" && (allowed as readonly string[]).includes(value);
 }
 
-function positiveIntInRange(value: unknown, min: number, max: number): number | undefined {
+function numberInRange(value: unknown, min: number, max: number): number | undefined {
   return typeof value === "number" &&
-    Number.isInteger(value) &&
+    Number.isFinite(value) &&
     value >= min &&
     value <= max
     ? value
@@ -78,8 +78,9 @@ export function mergeSettings(incoming: unknown): MakesPdfSettings {
     fontFamily: isOneOf(raw.fontFamily, FONT_FAMILIES)
       ? raw.fontFamily
       : DEFAULT_SETTINGS.fontFamily,
-    fontSize:
-      positiveIntInRange(raw.fontSize, 6, 24) ?? DEFAULT_SETTINGS.fontSize,
+    // The server schema takes any number in 6..24 (not just integers), so a
+    // fractional size is carried through rather than rounded away.
+    fontSize: numberInRange(raw.fontSize, 6, 24) ?? DEFAULT_SETTINGS.fontSize,
     margins: validMargins(raw.margins) ?? DEFAULT_SETTINGS.margins,
   };
 }

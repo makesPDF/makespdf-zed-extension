@@ -4,6 +4,7 @@
 // `node --test`; server.ts wires them to fetch and the editor UI.
 
 import { CLIENT_NAME } from "./commands.ts";
+import { asErrorCode } from "./feedback.ts";
 import type { MakesPdfSettings } from "./settings.ts";
 
 export const RENDER_PATH = "/api/v1/md";
@@ -90,7 +91,7 @@ export function classifyApiFailure(args: {
         message:
           "makesPDF: API token rejected. Check `lsp.makespdf.settings.apiToken` " +
           `or create a key at ${base}/settings/api-keys.`,
-        errorCode: codeShaped(detail.error),
+        errorCode: asErrorCode(detail.error),
       };
     }
     return {
@@ -98,7 +99,7 @@ export function classifyApiFailure(args: {
       message:
         "makesPDF: this server requires an API token. Create one at " +
         `${base}/settings/api-keys and paste it into \`lsp.makespdf.settings.apiToken\`.`,
-      errorCode: codeShaped(detail.error),
+      errorCode: asErrorCode(detail.error),
     };
   }
 
@@ -109,7 +110,7 @@ export function classifyApiFailure(args: {
     return {
       kind: "rate-limit",
       message: `makesPDF: rate limited. ${detail.tip ?? hint}`,
-      errorCode: codeShaped(detail.error),
+      errorCode: asErrorCode(detail.error),
     };
   }
 
@@ -121,7 +122,7 @@ export function classifyApiFailure(args: {
       message:
         `makesPDF: document is too long for an anonymous render (${pages} pages, cap ${cap}). ` +
         (detail.tip ?? `Sign up at ${base}/signup for higher limits.`),
-      errorCode: codeShaped(detail.error),
+      errorCode: asErrorCode(detail.error),
     };
   }
 
@@ -129,17 +130,8 @@ export function classifyApiFailure(args: {
   return {
     kind: "error",
     message: `makesPDF: export failed (HTTP ${status})${detailText ? `: ${detailText}` : "."}`,
-    errorCode: codeShaped(detail.error),
+    errorCode: asErrorCode(detail.error),
   };
-}
-
-// Only a code-shaped token is forwarded to feedback; server error text can
-// quote request content, and feedback `context` must stay fingerprint-only.
-// (Same rule as feedback.ts's asErrorCode.)
-function codeShaped(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  if (value.length > 64 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)) return undefined;
-  return value;
 }
 
 export interface ValidateIssue {
