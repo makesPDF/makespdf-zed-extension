@@ -11,12 +11,15 @@ import { CodeAction, CodeActionKind } from "vscode-languageserver/node.js";
 import { COMMAND_EXPORT, COMMAND_VALIDATE } from "./commands.ts";
 import { isFileUri } from "./paths.ts";
 
-export function buildCodeActions(documentUri: string): CodeAction[] {
+export function buildCodeActions(
+  documentUri: string,
+  options: { validate: boolean },
+): CodeAction[] {
   // Export writes next to the source file; a non-file document has no such
   // place, so neither action is offered.
   if (!isFileUri(documentUri)) return [];
 
-  return [
+  const actions: CodeAction[] = [
     {
       title: "Export to PDF",
       kind: `${CodeActionKind.Source}.makespdf.exportToPdf`,
@@ -26,7 +29,12 @@ export function buildCodeActions(documentUri: string): CodeAction[] {
         arguments: [documentUri],
       },
     },
-    {
+  ];
+
+  // /api/v1/md/validate has no anonymous access, so without a token the
+  // action could only ever fail.
+  if (options.validate) {
+    actions.push({
       title: "Validate accessibility",
       kind: `${CodeActionKind.Source}.makespdf.validateAccessibility`,
       command: {
@@ -34,6 +42,8 @@ export function buildCodeActions(documentUri: string): CodeAction[] {
         command: COMMAND_VALIDATE,
         arguments: [documentUri],
       },
-    },
-  ];
+    });
+  }
+
+  return actions;
 }

@@ -34,7 +34,7 @@ If the shortcut does nothing on your machine, bind it in your Zed `keymap.json`:
 ]
 ```
 
-**Validate accessibility needs an API token**: `POST /api/v1/md/validate` is authenticated. Export works anonymously within the limits below.
+**Validate accessibility needs an API token**: `POST /api/v1/md/validate` is authenticated, so the action only appears in the menu once `apiToken` is set. Export works anonymously within the limits below.
 
 ## Settings
 
@@ -59,7 +59,7 @@ Settings live under `lsp.makespdf.settings` in your Zed `settings.json` (same na
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `serviceUrl` | `https://makespdf.com` | URL of the PDF service. Change this only if you're running makesPDF self-hosted. |
+| `serviceUrl` | `https://makespdf.com` | URL of the PDF service. `apiToken` is only sent when this is `https://makespdf.com`, `https://staging.makespdf.com` or a `localhost` / `127.0.0.1` / `[::1]` address; any other URL gets anonymous requests. This stops a project's `.zed/settings.json` from pointing `serviceUrl` elsewhere and picking up the token from your user settings. |
 | `apiToken` | `""` | Optional. Leave blank for the default per-IP limits (60/hour, 200/day, 20 pages per render). Paste a key to lift the limits, persist renders, and use **Validate accessibility**. Get one at [makespdf.com/settings/api-keys](https://makespdf.com/settings/api-keys). |
 | `pageSize` | `A4` | A3, A4, A5, Letter, or Legal. |
 | `fontFamily` | `Inter` | Inter or NotoSans. |

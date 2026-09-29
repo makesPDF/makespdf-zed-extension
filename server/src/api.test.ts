@@ -41,6 +41,7 @@ test("the request body carries the buffer and the options", () => {
 
 test("a 401 with a key blames the key and points at the API keys page", () => {
   const failure = classifyApiFailure({
+    operation: "export",
     status: 401,
     apiToken: "stale",
     serviceUrl: "https://makespdf.com",
@@ -54,6 +55,7 @@ test("a 401 with a key blames the key and points at the API keys page", () => {
 
 test("a 401 without a key explains that the server wants an account", () => {
   const failure = classifyApiFailure({
+    operation: "export",
     status: 401,
     apiToken: "",
     serviceUrl: "https://makespdf.com",
@@ -65,6 +67,7 @@ test("a 401 without a key explains that the server wants an account", () => {
 
 test("a 429 suggests signing up only when anonymous", () => {
   const anon = classifyApiFailure({
+    operation: "export",
     status: 429,
     apiToken: "",
     serviceUrl: "https://makespdf.com",
@@ -74,6 +77,7 @@ test("a 429 suggests signing up only when anonymous", () => {
   assert.match(anon.message, /sign up/);
 
   const authed = classifyApiFailure({
+    operation: "export",
     status: 429,
     apiToken: "k",
     serviceUrl: "https://makespdf.com",
@@ -85,6 +89,7 @@ test("a 429 suggests signing up only when anonymous", () => {
 
 test("the anonymous page cap is reported with the actual and limit", () => {
   const failure = classifyApiFailure({
+    operation: "export",
     status: 400,
     apiToken: "",
     serviceUrl: "https://makespdf.com",
@@ -98,6 +103,7 @@ test("the anonymous page cap is reported with the actual and limit", () => {
 
 test("any other status shows the server's error field", () => {
   const failure = classifyApiFailure({
+    operation: "export",
     status: 500,
     apiToken: "",
     serviceUrl: "https://makespdf.com",
@@ -110,8 +116,21 @@ test("any other status shows the server's error field", () => {
   assert.equal(failure.errorCode, undefined);
 });
 
+test("a failed validate is not reported as a failed export", () => {
+  const failure = classifyApiFailure({
+    operation: "validate",
+    status: 500,
+    apiToken: "k",
+    serviceUrl: "https://makespdf.com",
+    body: {},
+  });
+  assert.match(failure.message, /validate failed \(HTTP 500\)/);
+  assert.doesNotMatch(failure.message, /export/);
+});
+
 test("a non-JSON error body still yields a status message", () => {
   const failure = classifyApiFailure({
+    operation: "export",
     status: 502,
     apiToken: "",
     serviceUrl: "https://makespdf.com",
@@ -123,12 +142,16 @@ test("a non-JSON error body still yields a status message", () => {
 
 test("transport failures name the service and nothing else", () => {
   assert.equal(
-    connectionFailureMessage("http://127.0.0.1:1", new Error("fetch failed")),
+    connectionFailureMessage("export", "http://127.0.0.1:1", new Error("fetch failed")),
     "makesPDF: could not reach the PDF service at http://127.0.0.1:1.",
   );
   assert.match(
-    connectionFailureMessage("https://makespdf.com", new Error("socket hang up")),
+    connectionFailureMessage("export", "https://makespdf.com", new Error("socket hang up")),
     /export failed: socket hang up/,
+  );
+  assert.match(
+    connectionFailureMessage("validate", "https://makespdf.com", new Error("socket hang up")),
+    /validate failed: socket hang up/,
   );
 });
 

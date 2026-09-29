@@ -61,6 +61,9 @@ export function readErrorDetail(body: unknown): ErrorDetail {
 
 export type ApiFailureKind = "auth" | "rate-limit" | "page-cap" | "error";
 
+/** Which call failed, for the wording of the user-facing message. */
+export type ApiOperation = "export" | "validate";
+
 export interface ApiFailure {
   kind: ApiFailureKind;
   /** The message to show the user. */
@@ -75,12 +78,13 @@ export interface ApiFailure {
  * anonymous rate limit and the structured page-cap guidance.
  */
 export function classifyApiFailure(args: {
+  operation: ApiOperation;
   status: number;
   apiToken: string;
   serviceUrl: string;
   body: unknown;
 }): ApiFailure {
-  const { status, apiToken, serviceUrl, body } = args;
+  const { operation, status, apiToken, serviceUrl, body } = args;
   const detail = readErrorDetail(body);
   const base = serviceUrl.replace(/\/+$/, "");
 
@@ -129,7 +133,7 @@ export function classifyApiFailure(args: {
   const detailText = typeof detail.error === "string" && detail.error ? detail.error : undefined;
   return {
     kind: "error",
-    message: `makesPDF: export failed (HTTP ${status})${detailText ? `: ${detailText}` : "."}`,
+    message: `makesPDF: ${operation} failed (HTTP ${status})${detailText ? `: ${detailText}` : "."}`,
     errorCode: asErrorCode(detail.error),
   };
 }
@@ -188,12 +192,16 @@ export function savedMessage(
 }
 
 /** The user-facing message for a transport failure (no HTTP response). */
-export function connectionFailureMessage(serviceUrl: string, error: unknown): string {
+export function connectionFailureMessage(
+  operation: ApiOperation,
+  serviceUrl: string,
+  error: unknown,
+): string {
   const message = error instanceof Error ? error.message : String(error);
   if (/ECONNREFUSED|fetch failed|ENOTFOUND|timed out|aborted/i.test(message)) {
     return `makesPDF: could not reach the PDF service at ${serviceUrl}.`;
   }
-  return `makesPDF: export failed: ${message}`;
+  return `makesPDF: ${operation} failed: ${message}`;
 }
 
 /** Options object assembled from the merged settings, for the request body. */

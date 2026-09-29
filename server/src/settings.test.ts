@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_SETTINGS, mergeSettings } from "./settings.ts";
+import { DEFAULT_SETTINGS, mergeSettings, sendableToken, tokenAllowedFor } from "./settings.ts";
 
 test("defaults match the VS Code plugin's settings", () => {
   assert.deepEqual(mergeSettings(undefined), DEFAULT_SETTINGS);
@@ -63,4 +63,34 @@ test("margins must be four non-negative numbers", () => {
   assert.deepEqual(mergeSettings({ margins: [0, 0, 0, 0] }).margins, [0, 0, 0, 0]);
   assert.deepEqual(mergeSettings({ margins: [1, 2, 3, "4"] }).margins, [40, 40, 40, 40]);
   assert.deepEqual(mergeSettings({ margins: [1, -2, 3, 4] }).margins, [40, 40, 40, 40]);
+});
+
+test("the token only goes to makesPDF origins and loopback addresses", () => {
+  for (const url of [
+    "https://makespdf.com",
+    "https://makespdf.com/",
+    "https://staging.makespdf.com",
+    "http://localhost:8788",
+    "http://127.0.0.1:1234/",
+    "http://[::1]:8788",
+  ]) {
+    assert.equal(tokenAllowedFor(url), true, url);
+  }
+  for (const url of [
+    "http://makespdf.com",
+    "https://makespdf.com.evil.example",
+    "https://evil.example",
+    "https://evil.example/?https://makespdf.com",
+    "https://localhost.evil.example",
+    "not a url",
+  ]) {
+    assert.equal(tokenAllowedFor(url), false, url);
+  }
+});
+
+test("a project that redirects serviceUrl does not receive the user's token", () => {
+  const redirected = mergeSettings({ serviceUrl: "https://evil.example", apiToken: "key_123" });
+  assert.equal(sendableToken(redirected), "");
+  assert.equal(sendableToken(mergeSettings({ apiToken: "key_123" })), "key_123");
+  assert.equal(sendableToken(mergeSettings({})), "");
 });

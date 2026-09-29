@@ -125,14 +125,39 @@ async function codeActions(harness: Harness): Promise<any[]> {
   })) as any[];
 }
 
-async function execute(harness: Harness, command: string): Promise<any> {
-  return harness.client.request("workspace/executeCommand", {
+function finishedCount(harness: Harness, command: string): number {
+  return (harness.client.notificationsFor("window/logMessage") as any[]).filter(
+    (params) => params.message === `makesPDF: ${command} finished`,
+  ).length;
+}
+
+/**
+ * Execute a command and wait for it to finish. The server answers
+ * `workspace/executeCommand` at once and runs the command detached, logging
+ * `makesPDF: <command> finished` when it is done.
+ */
+async function execute(harness: Harness, command: string): Promise<void> {
+  const before = finishedCount(harness, command);
+  const reply = await harness.client.request("workspace/executeCommand", {
     command,
     arguments: [harness.uri],
   });
+  assert.equal(reply, null, "executeCommand is answered before the command runs");
+  const deadline = Date.now() + 15_000;
+  while (finishedCount(harness, command) <= before) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${command} to finish`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
-test("codeAction offers Export and Validate; Export writes the mock bytes and sends the client header", async () => {
+/** Log lines other than the "finished" markers. */
+function issueLogs(client: LspClient): any[] {
+  return (client.notificationsFor("window/logMessage") as any[]).filter(
+    (params) => !/ finished$/.test(params.message),
+  );
+}
+
+test("codeAction offers Export (and Validate only with a token); Export writes the mock bytes and sends the client header", async () => {
   const pdfBytes = Buffer.from("%PDF-1.4 mock-bytes\n");
   const harness = await startHarness({
     routes: [
@@ -151,19 +176,14 @@ test("codeAction offers Export and Validate; Export writes the mock bytes and se
     ],
   });
   try {
-    const actions = await codeActions(harness);
-    assert.equal(actions.length, 2);
+    // Validate has no anonymous access, so it is hidden without a token.
+    const anonymous = await codeActions(harness);
     assert.deepEqual(
-      actions.map((action) => action.title),
-      ["Export to PDF", "Validate accessibility"],
+      anonymous.map((action) => action.title),
+      ["Export to PDF"],
     );
-    assert.deepEqual(
-      actions.map((action) => action.command.command),
-      [COMMAND_EXPORT, COMMAND_VALIDATE],
-    );
-    for (const action of actions) {
-      assert.deepEqual(action.command.arguments, [harness.uri]);
-    }
+    assert.equal(anonymous[0].command.command, COMMAND_EXPORT);
+    assert.deepEqual(anonymous[0].command.arguments, [harness.uri]);
 
     await execute(harness, COMMAND_EXPORT);
 
@@ -198,6 +218,20 @@ test("codeAction offers Export and Validate; Export writes the mock bytes and se
       /Create an account/.test(params.message),
     );
     assert.equal(tips.length, 1);
+
+    harness.applySettings({ apiToken: "key_123" });
+    const authed = await codeActions(harness);
+    assert.deepEqual(
+      authed.map((action) => action.title),
+      ["Export to PDF", "Validate accessibility"],
+    );
+    assert.deepEqual(
+      authed.map((action) => action.command.command),
+      [COMMAND_EXPORT, COMMAND_VALIDATE],
+    );
+    for (const action of authed) {
+      assert.deepEqual(action.command.arguments, [harness.uri]);
+    }
   } finally {
     await harness.dispose();
   }
@@ -228,6 +262,7 @@ test("Export sends no Authorization without a token and Bearer with one", async 
 
 test("Validate shows the issue summary and logs each issue", async () => {
   const harness = await startHarness({
+    settings: { apiToken: "key_v" },
     routes: [
       {
         path: "/api/v1/md/validate",
@@ -255,7 +290,7 @@ test("Validate shows the issue summary and logs each issue", async () => {
     assert.match(summary.message, /Heading level skipped/);
     assert.match(summary.message, /Image missing alt text/);
 
-    const logs = harness.client.notificationsFor("window/logMessage") as any[];
+    const logs = issueLogs(harness.client);
     assert.equal(logs.length, 2);
     assert.deepEqual(
       logs.map((params) => params.type),
@@ -272,6 +307,7 @@ test("Validate shows the issue summary and logs each issue", async () => {
       header(validate[0]!, "x-makespdf-client"),
       `zed-extension/${SERVER_PACKAGE.version}`,
     );
+    assert.equal(header(validate[0]!, "authorization"), "Bearer key_v");
   } finally {
     await harness.dispose();
   }

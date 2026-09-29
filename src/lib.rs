@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, fs};
 
 use zed_extension_api::{self as zed, settings::LspSettings, LanguageServerId, Result};
 
@@ -15,42 +15,56 @@ const SERVER_ENTRY: &str = "node_modules/@makespdf/zed-language-server/dist/serv
 /// so the sidecar can be used before it is published.
 const DEV_SERVER_ENV: &str = "MAKESPDF_ZED_SERVER_JS";
 
-struct MakesPdfExtension;
+struct MakesPdfExtension {
+    /// Set once the sidecar has been found on disk after an update check, so
+    /// later server starts in this session skip the npm registry.
+    did_find_server: bool,
+}
+
+fn server_exists() -> bool {
+    fs::metadata(SERVER_ENTRY).is_ok_and(|metadata| metadata.is_file())
+}
 
 impl MakesPdfExtension {
     /// Install or update the sidecar and return the path to its entry point.
-    fn server_entry(language_server_id: &LanguageServerId) -> Result<String> {
+    ///
+    /// An update that fails (registry unreachable, tarball or disk error)
+    /// falls back to the version already installed; only a missing sidecar
+    /// is an error.
+    fn server_entry(&mut self, language_server_id: &LanguageServerId) -> Result<String> {
+        if self.did_find_server && server_exists() {
+            return Self::entry_path();
+        }
+
+        zed::set_language_server_installation_status(
+            language_server_id,
+            &zed::LanguageServerInstallationStatus::CheckingForUpdate,
+        );
+
         let installed = zed::npm_package_installed_version(NPM_PACKAGE)?;
+        let update_error = match zed::npm_package_latest_version(NPM_PACKAGE) {
+            Ok(latest) if installed.as_deref() != Some(latest.as_str()) => {
+                zed::set_language_server_installation_status(
+                    language_server_id,
+                    &zed::LanguageServerInstallationStatus::Downloading,
+                );
+                zed::npm_install_package(NPM_PACKAGE, &latest)
+                    .err()
+                    .map(|error| format!("failed to install {NPM_PACKAGE}@{latest}: {error}"))
+            }
+            Ok(_) => None,
+            Err(error) => Some(format!(
+                "could not reach the npm registry to install {NPM_PACKAGE}: {error}"
+            )),
+        };
 
-        match zed::npm_package_latest_version(NPM_PACKAGE) {
-            Ok(latest) => {
-                if installed.as_deref() != Some(latest.as_str()) {
-                    zed::set_language_server_installation_status(
-                        language_server_id,
-                        &zed::LanguageServerInstallationStatus::Downloading,
-                    );
-                    zed::npm_install_package(NPM_PACKAGE, &latest).map_err(|error| {
-                        format!("failed to install {NPM_PACKAGE}@{latest}: {error}")
-                    })?;
-                }
-            }
-            // No registry reachable. A version already on disk still works;
-            // with nothing installed there is nothing to run, so say so.
-            Err(error) => {
-                if installed.is_none() {
-                    return Err(format!(
-                        "could not reach the npm registry to install {NPM_PACKAGE}: {error}"
-                    ));
-                }
-            }
+        if !server_exists() {
+            return Err(update_error.unwrap_or_else(|| {
+                format!("the installed {NPM_PACKAGE} package does not contain {SERVER_ENTRY}")
+            }));
         }
 
-        if std::fs::metadata(SERVER_ENTRY).is_err() {
-            return Err(format!(
-                "the installed {NPM_PACKAGE} package does not contain {SERVER_ENTRY}"
-            ));
-        }
-
+        self.did_find_server = true;
         Self::entry_path()
     }
 
@@ -72,7 +86,9 @@ impl MakesPdfExtension {
 
 impl zed::Extension for MakesPdfExtension {
     fn new() -> Self {
-        Self
+        Self {
+            did_find_server: false,
+        }
     }
 
     fn language_server_command(
@@ -80,11 +96,6 @@ impl zed::Extension for MakesPdfExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
-        zed::set_language_server_installation_status(
-            language_server_id,
-            &zed::LanguageServerInstallationStatus::CheckingForUpdate,
-        );
-
         // Dev override: run a locally built server instead of the npm package.
         if let Some(path) = worktree
             .shell_env()
@@ -99,7 +110,7 @@ impl zed::Extension for MakesPdfExtension {
             });
         }
 
-        let server_entry = Self::server_entry(language_server_id)?;
+        let server_entry = self.server_entry(language_server_id)?;
 
         Ok(zed::Command {
             command: zed::node_binary_path()?,

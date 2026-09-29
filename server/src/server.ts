@@ -47,7 +47,12 @@ import {
   type RenderFailureFacts,
 } from "./feedback.ts";
 import { isFileUri, pdfTarget } from "./paths.ts";
-import { DEFAULT_SETTINGS, mergeSettings, type MakesPdfSettings } from "./settings.ts";
+import {
+  DEFAULT_SETTINGS,
+  mergeSettings,
+  sendableToken,
+  type MakesPdfSettings,
+} from "./settings.ts";
 import { SERVER_VERSION } from "./version.ts";
 
 const REPORT_PROBLEM = "Report problem";
@@ -61,6 +66,8 @@ let settings: MakesPdfSettings = { ...DEFAULT_SETTINGS };
 let supportsPull = false;
 /** The anonymous-render tip is surfaced once per server (Zed session). */
 let anonymousTipShown = false;
+/** The withheld-token warning is surfaced once per server (Zed session). */
+let withheldTokenWarned = false;
 
 // Plain `window/showMessage` notifications for outcomes with nothing to click.
 // (`connection.window.showInformationMessage` would send a showMessageRequest,
@@ -120,10 +127,19 @@ async function pullSettings(): Promise<void> {
 connection.onCodeAction((params) => {
   const document = documents.get(params.textDocument.uri);
   if (!document) return [];
-  return buildCodeActions(document.uri);
+  return buildCodeActions(document.uri, { validate: Boolean(sendableToken(settings)) });
 });
 
-connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
+// Answer `workspace/executeCommand` at once and run the command detached.
+// Zed times the request out after 120 s (`request_timeout`), and an export
+// can take that long on its own, before a "Report problem" prompt then waits
+// for the user inside the same handler.
+connection.onExecuteCommand((params: ExecuteCommandParams) => {
+  void runCommand(params);
+  return null;
+});
+
+async function runCommand(params: ExecuteCommandParams): Promise<void> {
   try {
     const uri = firstStringArgument(params.arguments);
     if (!uri) {
@@ -139,8 +155,30 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
     showError(
       `makesPDF: unexpected error: ${error instanceof Error ? error.message : String(error)}`,
     );
+  } finally {
+    // Marks the end of a detached command in the language server log; the
+    // integration tests wait on it.
+    void connection.sendNotification(LogMessageNotification.type, {
+      type: MessageType.Log,
+      message: `makesPDF: ${params.command} finished`,
+    });
   }
-});
+}
+
+/**
+ * The token for this request. A configured token that `serviceUrl` may not
+ * receive is withheld (see `tokenAllowedFor`), and the user is told once.
+ */
+function requestToken(): string {
+  const token = sendableToken(settings);
+  if (settings.apiToken && !token && !withheldTokenWarned) {
+    withheldTokenWarned = true;
+    showWarning(
+      `makesPDF: apiToken is only sent to makespdf.com or a localhost server, so requests to ${settings.serviceUrl} go without it.`,
+    );
+  }
+  return token;
+}
 
 function firstStringArgument(args: ExecuteCommandParams["arguments"]): string | undefined {
   const first = args?.[0];
@@ -167,6 +205,7 @@ async function exportToPdf(uri: string): Promise<void> {
 
   const { title, pdfPath } = pdfTarget(uri);
   const options = optionsFromSettings(settings, title);
+  const apiToken = requestToken();
   // Fingerprints for "Report problem": sizes and settings, never the text or
   // the file name. The failure's status and code are added below.
   const facts: RenderFailureFacts = {
@@ -180,25 +219,30 @@ async function exportToPdf(uri: string): Promise<void> {
   try {
     response = await fetch(apiUrl(settings.serviceUrl, RENDER_PATH), {
       method: "POST",
-      headers: requestHeaders(SERVER_VERSION, settings.apiToken),
+      headers: requestHeaders(SERVER_VERSION, apiToken),
       body: markdownBody(markdown, options),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
-    await reportExportProblem(connectionFailureMessage(settings.serviceUrl, error), facts);
+    await reportExportProblem(
+      connectionFailureMessage("export", settings.serviceUrl, error),
+      facts,
+      apiToken,
+    );
     return;
   }
 
   if (!response.ok) {
     facts.httpStatus = response.status;
     const failure = classifyApiFailure({
+      operation: "export",
       status: response.status,
-      apiToken: settings.apiToken,
+      apiToken,
       serviceUrl: settings.serviceUrl,
       body: await readJsonBody(response),
     });
     facts.errorCode = failure.errorCode;
-    await reportExportProblem(failure.message, facts);
+    await reportExportProblem(failure.message, facts, apiToken);
     return;
   }
 
@@ -209,7 +253,7 @@ async function exportToPdf(uri: string): Promise<void> {
   );
 
   // Surface the server's upsell hint once per session, anonymous renders only.
-  const tip = settings.apiToken ? null : response.headers.get("X-MakesPDF-Tip");
+  const tip = apiToken ? null : response.headers.get("X-MakesPDF-Tip");
   if (tip && !anonymousTipShown) {
     anonymousTipShown = true;
     showInfo(`makesPDF: ${tip}`);
@@ -235,24 +279,26 @@ async function validateAccessibility(uri: string): Promise<void> {
   }
 
   const options = optionsFromSettings(settings, pdfTarget(uri).title);
+  const apiToken = requestToken();
 
   let response: Response;
   try {
     response = await fetch(apiUrl(settings.serviceUrl, VALIDATE_PATH), {
       method: "POST",
-      headers: requestHeaders(SERVER_VERSION, settings.apiToken),
+      headers: requestHeaders(SERVER_VERSION, apiToken),
       body: markdownBody(markdown, options),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
-    showError(connectionFailureMessage(settings.serviceUrl, error));
+    showError(connectionFailureMessage("validate", settings.serviceUrl, error));
     return;
   }
 
   if (!response.ok) {
     const failure = classifyApiFailure({
+      operation: "validate",
       status: response.status,
-      apiToken: settings.apiToken,
+      apiToken,
       serviceUrl: settings.serviceUrl,
       body: await readJsonBody(response),
     });
@@ -286,6 +332,7 @@ async function validateAccessibility(uri: string): Promise<void> {
 async function reportExportProblem(
   message: string,
   facts: RenderFailureFacts,
+  apiToken: string,
 ): Promise<void> {
   const choice = await connection.window.showErrorMessage(message, {
     title: REPORT_PROBLEM,
@@ -295,7 +342,7 @@ async function reportExportProblem(
   const result = await sendFeedback({
     serviceUrl: settings.serviceUrl,
     version: SERVER_VERSION,
-    apiToken: settings.apiToken,
+    apiToken,
     kind: "problem",
     message: problemReportMessage(facts),
     context: buildProblemContext(facts),

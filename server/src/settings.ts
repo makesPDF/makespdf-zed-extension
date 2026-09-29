@@ -56,6 +56,34 @@ function validMargins(value: unknown): number[] | undefined {
   return value as number[];
 }
 
+/** Origins the API token may be sent to, besides loopback addresses. */
+const TOKEN_ORIGINS = ["https://makespdf.com", "https://staging.makespdf.com"];
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Whether `serviceUrl` may receive the API token.
+ *
+ * Zed deep-merges project settings (`.zed/settings.json`) over the user's, so
+ * a cloned repository that sets only `serviceUrl` would otherwise inherit the
+ * user's global `apiToken` and receive it on the next export. Only makesPDF's
+ * own origins and loopback addresses (a local dev server) get the token.
+ */
+export function tokenAllowedFor(serviceUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(serviceUrl);
+  } catch {
+    return false;
+  }
+  if (TOKEN_ORIGINS.includes(url.origin)) return true;
+  return (url.protocol === "http:" || url.protocol === "https:") && LOOPBACK_HOSTS.has(url.hostname);
+}
+
+/** The token to send with requests to `settings.serviceUrl`, or "" for none. */
+export function sendableToken(settings: MakesPdfSettings): string {
+  return settings.apiToken && tokenAllowedFor(settings.serviceUrl) ? settings.apiToken : "";
+}
+
 /**
  * Merge a raw configuration object over the defaults. Every field falls back
  * individually, so one bad setting costs that setting, not the whole set.

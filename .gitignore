@@ -9,3 +9,6 @@
 server/node_modules/
 server/dist/
 server/*.tgz
+
+# Built by Zed when the repo is installed as a dev extension
+extension.wasm
