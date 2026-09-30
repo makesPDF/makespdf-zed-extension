@@ -1,0 +1,19 @@
+[package]
+name = "makespdf-zed-extension"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+[profile.release]
+strip = "debuginfo"
+lto = true
+opt-level = "s"
+codegen-units = 1
+panic = "abort"

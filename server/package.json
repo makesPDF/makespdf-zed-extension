@@ -1,0 +1,42 @@
+{
+  "name": "@makespdf/zed-language-server",
+  "version": "0.1.0",
+  "description": "Language server for the makesPDF Zed extension: export Markdown to accessible PDFs via LSP code actions.",
+  "license": "MIT",
+  "author": "Jason Galea",
+  "homepage": "https://makespdf.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/makesPDF/makespdf-zed-extension.git"
+  },
+  "bugs": {
+    "url": "https://github.com/makesPDF/makespdf-zed-extension/issues"
+  },
+  "main": "dist/server.js",
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/*.test.ts",
+    "test:integration": "npm run build && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
+    "test": "npm run typecheck && npm run test:unit && npm run test:integration",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.2"
+  }
+}

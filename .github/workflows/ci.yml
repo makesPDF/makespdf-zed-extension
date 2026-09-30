@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  extension:
+    name: WASM extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
+
+      - name: Build the extension
+        run: cargo build --target wasm32-wasip2 --release --locked
+
+  server:
+    name: Language server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - run: npm ci
+
+      # typecheck + unit tests + the stdio LSP integration test against a
+      # local mock HTTP server.
+      - run: npm test
