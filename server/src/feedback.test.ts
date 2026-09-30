@@ -93,7 +93,7 @@ test("headers: client header always, Authorization only with a token", () => {
     message: "More themes please",
   });
   const anonHeaders = anon.init.headers as Record<string, string>;
-  assert.equal(anonHeaders["X-MakesPDF-Client"], "zed-extension/0.1.0");
+  assert.equal(anonHeaders["X-MakesPDF-Client"], "zed/0.1.0");
   assert.equal(anonHeaders.Authorization, undefined);
   assert.ok(!("context" in JSON.parse(anon.init.body as string)), "command sends no context");
 

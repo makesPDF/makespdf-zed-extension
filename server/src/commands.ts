@@ -6,4 +6,4 @@ export const COMMAND_VALIDATE = "makespdf.validateAccessibility";
 export const SETTINGS_SECTION = "makespdf";
 
 /** Prefix of the `X-MakesPDF-Client` header every request sends. */
-export const CLIENT_NAME = "zed-extension";
+export const CLIENT_NAME = "zed";

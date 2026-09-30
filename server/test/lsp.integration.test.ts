@@ -194,7 +194,7 @@ test("codeAction offers Export (and Validate only with a token); Export writes t
     const request = render[0]!;
     assert.equal(
       header(request, "x-makespdf-client"),
-      `zed-extension/${SERVER_PACKAGE.version}`,
+      `zed/${SERVER_PACKAGE.version}`,
     );
     assert.equal(header(request, "authorization"), undefined);
     assert.equal(request.json.markdown, MARKDOWN);
@@ -305,7 +305,7 @@ test("Validate shows the issue summary and logs each issue", async () => {
     assert.equal(validate[0]!.json.markdown, MARKDOWN);
     assert.equal(
       header(validate[0]!, "x-makespdf-client"),
-      `zed-extension/${SERVER_PACKAGE.version}`,
+      `zed/${SERVER_PACKAGE.version}`,
     );
     assert.equal(header(validate[0]!, "authorization"), "Bearer key_v");
   } finally {
@@ -344,7 +344,7 @@ test("a 500 export offers Report problem, and picking it POSTs the fingerprints"
     const feedback = harness.api.requestsFor("/api/v1/feedback");
     assert.equal(feedback.length, 1);
     const request = feedback[0]!;
-    assert.equal(header(request, "x-makespdf-client"), `zed-extension/${SERVER_PACKAGE.version}`);
+    assert.equal(header(request, "x-makespdf-client"), `zed/${SERVER_PACKAGE.version}`);
     assert.equal(header(request, "authorization"), undefined);
     assert.equal(request.json.kind, "problem");
     assert.equal(request.json.context.httpStatus, 500);
