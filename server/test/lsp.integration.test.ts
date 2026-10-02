@@ -51,10 +51,16 @@ interface Harness {
 async function startHarness(options: {
   routes: MockRoute[];
   settings?: Record<string, unknown>;
+  markdown?: string;
+  files?: Record<string, string | Buffer>;
 }): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "makespdf-zed-"));
+  const markdown = options.markdown ?? MARKDOWN;
   const mdPath = join(dir, "report.md");
-  await writeFile(mdPath, MARKDOWN);
+  await writeFile(mdPath, markdown);
+  for (const [name, contents] of Object.entries(options.files ?? {})) {
+    await writeFile(join(dir, name), contents);
+  }
   const uri = pathToFileURL(mdPath).toString();
 
   const api = await startMockApi(options.routes);
@@ -90,7 +96,7 @@ async function startHarness(options: {
   // happened so the push below is applied on top of a completed pull.
   await client.waitForServerRequest("workspace/configuration");
   client.notify("textDocument/didOpen", {
-    textDocument: { uri, languageId: "markdown", version: 1, text: MARKDOWN },
+    textDocument: { uri, languageId: "markdown", version: 1, text: markdown },
   });
   // Push the same settings; the push is applied synchronously by the command
   // handlers, which removes any race with the initial asynchronous pull.
@@ -232,6 +238,68 @@ test("codeAction offers Export (and Validate only with a token); Export writes t
     for (const action of authed) {
       assert.deepEqual(action.command.arguments, [harness.uri]);
     }
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("Export inlines local images as data: URIs while Validate sends the plain reference", async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7, 7]);
+  const dataUri = `data:image/png;base64,${png.toString("base64")}`;
+  const markdown = "# Diagram\n\n![diagram](diagram.png)\n\n![gone](missing.png)\n";
+  const harness = await startHarness({
+    markdown,
+    files: { "diagram.png": png },
+    settings: { apiToken: "key_v" },
+    routes: [
+      {
+        path: "/api/v1/md",
+        reply: { status: 200, body: Buffer.from("%PDF-1.4 image mock\n") },
+      },
+      {
+        path: "/api/v1/md/validate",
+        reply: {
+          status: 200,
+          body: JSON.stringify({
+            valid: true,
+            issues: [],
+            summary: { errors: 0, warnings: 0 },
+          }),
+        },
+      },
+    ],
+  });
+  try {
+    await execute(harness, COMMAND_EXPORT);
+
+    const render = harness.api.requestsFor("/api/v1/md");
+    assert.equal(render.length, 1);
+    assert.equal(
+      render[0]!.json.markdown,
+      `# Diagram\n\n![diagram](${dataUri})\n\n![gone](missing.png)\n`,
+      "the readable image is embedded and the unreadable one stays a reference",
+    );
+
+    // The unreadable image is named in one non-fatal warning; export still
+    // ran and wrote the PDF.
+    assert.deepEqual(
+      await readFile(join(harness.dir, "report.pdf")),
+      Buffer.from("%PDF-1.4 image mock\n"),
+    );
+    const warning = messages(harness.client).find((params) =>
+      /local image/.test(params.message),
+    );
+    assert.ok(warning, "an unreadable image produces a non-fatal warning");
+    assert.equal(warning.type, 2, "the notice is a Warning (2)");
+    assert.match(warning.message, /missing\.png/);
+    assert.match(warning.message, /left as-is/);
+    assert.ok(!warning.message.includes("diagram.png"), "the embedded image is not named");
+
+    // Validate checks the Markdown, not the image bytes, so it must not inline.
+    await execute(harness, COMMAND_VALIDATE);
+    const validate = harness.api.requestsFor("/api/v1/md/validate");
+    assert.equal(validate.length, 1);
+    assert.equal(validate[0]!.json.markdown, markdown, "Validate posts the buffer verbatim");
   } finally {
     await harness.dispose();
   }

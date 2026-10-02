@@ -46,7 +46,8 @@ import {
   sendFeedback,
   type RenderFailureFacts,
 } from "./feedback.ts";
-import { isFileUri, pdfTarget } from "./paths.ts";
+import { formatImageNotice, inlineLocalImages } from "./images.ts";
+import { fileDir, isFileUri, pdfTarget } from "./paths.ts";
 import {
   DEFAULT_SETTINGS,
   mergeSettings,
@@ -203,6 +204,16 @@ async function exportToPdf(uri: string): Promise<void> {
     return;
   }
 
+  // Inline images referenced by local path so they survive the trip to the
+  // server, which can only fetch http(s) URLs — it has no filesystem access.
+  // Remote URLs and existing data: URIs are left untouched.
+  const { markdown: markdownToSend, failures } = await inlineLocalImages(
+    markdown,
+    fileDir(uri),
+  );
+  const imageNotice = formatImageNotice(failures);
+  if (imageNotice) showWarning(`makesPDF: ${imageNotice}`);
+
   const { title, pdfPath } = pdfTarget(uri);
   const options = optionsFromSettings(settings, title);
   const apiToken = requestToken();
@@ -220,7 +231,7 @@ async function exportToPdf(uri: string): Promise<void> {
     response = await fetch(apiUrl(settings.serviceUrl, RENDER_PATH), {
       method: "POST",
       headers: requestHeaders(SERVER_VERSION, apiToken),
-      body: markdownBody(markdown, options),
+      body: markdownBody(markdownToSend, options),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {

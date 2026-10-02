@@ -8,7 +8,7 @@ Export the Markdown file you're editing to an accessible, archival-quality PDF (
 
 Zed's extension API has no command palette, event hooks or webviews, so makesPDF ships as a **language server for Markdown** whose code actions do the work:
 
-- **Export to PDF** — posts the current buffer (not the file on disk) to makesPDF and writes the PDF next to the source file, overwriting `<name>.pdf`. A message tells you where it went and how many pages it rendered.
+- **Export to PDF** — posts the current buffer (not the file on disk) to makesPDF and writes the PDF next to the source file, overwriting `<name>.pdf`. Images referenced by a local relative or absolute path are embedded as `data:` URIs first, so they appear in the PDF. A message tells you where it went and how many pages it rendered.
 - **Validate accessibility** — runs the same PDF/UA-1 content checks as the renderer (heading hierarchy, image alt text) without producing a PDF. The summary shows the error and warning counts plus the first few issues; every issue is written to the log.
 - **Report problem** — if an export fails, the error dialog offers **Report problem**, which sends the failure's fingerprints (never your text) to makesPDF.
 
@@ -68,13 +68,13 @@ Settings live under `lsp.makespdf.settings` in your Zed `settings.json` (same na
 
 ## Limits and privacy
 
-Documents up to 20 pages render out of the box, rate-limited to 60/hour and 200/day per IP. An API key removes the per-IP rate limit and the per-render page cap (the 200KB Markdown input cap still applies) and persists your PDFs to [makespdf.com/settings/renders](https://makespdf.com/settings/renders) for re-download. See [makespdf.com/pricing](https://makespdf.com/pricing); PDFs on the Free and Hobbyist plans include a small `makespdf.com` link at the bottom of the page.
+Documents up to 20 pages render out of the box, rate-limited to 60/hour and 200/day per IP. An API key removes the per-IP rate limit and the per-render page cap (the 200KB cap still applies to the Markdown text; embedded image bytes are bounded by the service's image limits) and persists your PDFs to [makespdf.com/settings/renders](https://makespdf.com/settings/renders) for re-download. See [makespdf.com/pricing](https://makespdf.com/pricing); PDFs on the Free and Hobbyist plans include a small `makespdf.com` link at the bottom of the page.
 
-Your Markdown crosses the network only when you run **Export to PDF** or **Validate accessibility**. When you use **Report problem**, the message is built from the failure shape (HTTP status, error code, page size, font family, font size, document size in bytes) — never your Markdown, file name or path. The service stores feedback with a daily-salted hash of your IP address and your country code and keeps it until the makesPDF team deletes it; your IP address is also used, unhashed, for rate limiting.
+Your Markdown crosses the network only when you run **Export to PDF** or **Validate accessibility**. An export also carries the bytes of the local images your Markdown references by path, embedded as `data:` URIs so the service can render them; **Validate accessibility** sends the Markdown alone, without image bytes. When you use **Report problem**, the message is built from the failure shape (HTTP status, error code, page size, font family, font size, document size in bytes) — never your Markdown, file name or path. The service stores feedback with a daily-salted hash of your IP address and your country code and keeps it until the makesPDF team deletes it; your IP address is also used, unhashed, for rate limiting.
 
 Anonymous renders are not persisted to an account; named renders (with an API key) are stored so you can re-download them. See the [privacy policy](https://makespdf.com/legal/privacy).
 
-**Local images are not embedded in v1.** The service can fetch `http(s)` URLs and `data:` URIs only, so an image referenced by a local relative path (`![diagram](diagram.png)`) is left as a plain reference and will be missing from the PDF. Host it somewhere reachable or inline it as a `data:` URI if it must appear.
+**Local images are embedded on export.** An image referenced by a relative path (`![diagram](diagram.png)`) or an absolute path is read and embedded as a `data:` URI before the Markdown is sent, so the service can render it without filesystem access. Files larger than 5MB per image are left as plain references and named in a non-fatal warning; the same warning names references that could not be read. `http(s)` URLs are left for the service to fetch.
 
 ## Development
 

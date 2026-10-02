@@ -9,6 +9,11 @@ export function isFileUri(uri: string): boolean {
   return uri.startsWith("file://");
 }
 
+/** Directory containing the document, for resolving relative image paths. */
+export function fileDir(uri: string): string {
+  return dirname(fileURLToPath(uri));
+}
+
 export interface PdfTarget {
   /** Output path: `<same dir as the source>/<base name>.pdf`. */
   pdfPath: string;
