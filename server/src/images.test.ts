@@ -201,3 +201,55 @@ test("formatImageNotice names failures in one non-fatal warning", () => {
       "b.png (could not be read), c.png (could not be read)…. They were left as-is.",
   );
 });
+
+test("failures across markdown and HTML references keep document order", async () => {
+  await withDir({}, async (dir) => {
+    const source = '<img src="first-missing.png">\n\n![second](second-missing.jpg)\n';
+    const result = await inlineLocalImages(source, dir);
+    assert.deepEqual(result.failures, [
+      { src: "first-missing.png", reason: "unreadable" },
+      { src: "second-missing.jpg", reason: "unreadable" },
+    ]);
+  });
+});
+
+test("an <img> lazy-loading from data-src has its real src inlined, not data-src", async () => {
+  await withDir({ "diagram.png": PNG }, async (dir) => {
+    const source = '<img data-src="diagram.png" src="diagram.png" alt="x">\n';
+    const result = await inlineLocalImages(source, dir);
+    assert.deepEqual(result.failures, []);
+    assert.equal(
+      result.markdown,
+      `<img data-src="diagram.png" src="${PNG_URI}" alt="x">\n`,
+    );
+  });
+});
+
+test("a valid reference after a malformed one is still inlined", async () => {
+  await withDir({ "ok.png": PNG }, async (dir) => {
+    const result = await inlineLocalImages("![bad](x ![good](ok.png)\n", dir);
+    assert.deepEqual(result.failures, []);
+    assert.equal(result.markdown, `![bad](x ![good](${PNG_URI})\n`);
+  });
+});
+
+test("pathological runs of unterminated references are scanned in linear time", async () => {
+  await withDir({}, async (dir) => {
+    const sources = [
+      "![a](".repeat(200_000),
+      "<img ".repeat(200_000),
+      `${"![a](x".repeat(200_000)} y)`,
+    ];
+    for (const source of sources) {
+      const started = performance.now();
+      const result = await inlineLocalImages(source, dir);
+      const elapsed = performance.now() - started;
+      assert.equal(result.markdown, source, "nothing is rewritten");
+      assert.deepEqual(result.failures, []);
+      // The backtracking regexes this replaced took ~13s at 160KB on the
+      // first pattern and scaled quadratically, so this bound fails loudly
+      // on any regression to super-linear scanning.
+      assert.ok(elapsed < 2_000, `scanning ${source.length} chars took ${elapsed}ms`);
+    }
+  });
+});

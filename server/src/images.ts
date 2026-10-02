@@ -7,6 +7,14 @@
 // are left alone, code blocks and inline spans are masked so literal
 // image-like text is untouched, and unreadable or oversized files are
 // reported non-fatally and left as references.
+//
+// References are found with left-to-right scans rather than the VS Code
+// plugin's backtracking regexes: the document is arbitrary input, and runs of
+// unterminated references (`![a](` repeated) made those regexes quadratic —
+// ~13s of blocking work at 160KB, hours at a few MB — in a single-threaded
+// language server. The scans memoise the delimiter lookups they would
+// otherwise repeat, so they stay linear while still finding every reference
+// the regexes found, including references nested inside malformed ones.
 
 import { readFile, stat } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
@@ -33,18 +41,10 @@ export const IMAGE_MIME_BY_EXT: Record<string, string> = {
   ".apng": "image/apng",
 };
 
-// Markdown image: ![alt](src "optional title"). Group 2 is the src (possibly
-// wrapped in <…>); group 3 is the optional title with its leading whitespace.
-const MD_IMAGE =
-  /!\[([^\]]*)\]\(\s*(<[^>]+>|[^)\s]+)((?:\s+(?:"[^"]*"|'[^']*'))?)\s*\)/g;
-// HTML <img …src="…">. Group 1 is everything up to and including `src=`,
-// group 3/4 is the quoted value (double/single).
-const HTML_IMAGE_SRC = /(<img\b[^>]*?\bsrc\s*=\s*)("([^"]*)"|'([^']*)')/gi;
-
 export type ImageFailureReason = "unreadable" | "too-large";
 
 export interface ImageFailure {
-  /** The reference exactly as written in the Markdown. */
+  /** The reference as written, minus `<…>` brackets and surrounding space. */
   src: string;
   reason: ImageFailureReason;
 }
@@ -70,10 +70,14 @@ export async function inlineLocalImages(
   // inline spans (where it's literal text the user wants to see verbatim).
   const { masked, restore } = maskCode(source);
 
+  // The two syntaxes are scanned independently, as the regexes were, so a
+  // reference nested inside another reference's text is still found.
+  const markdownMatches = scanMarkdownImages(masked);
+  const htmlMatches = scanHtmlImages(masked);
+
   const srcs = new Set<string>();
-  for (const m of masked.matchAll(MD_IMAGE)) srcs.add(cleanSrc(m[2]!));
-  for (const m of masked.matchAll(HTML_IMAGE_SRC)) {
-    srcs.add(cleanSrc(m[3] ?? m[4] ?? ""));
+  for (const match of [...markdownMatches, ...htmlMatches].sort((a, b) => a.start - b.start)) {
+    srcs.add(cleanSrc(match.src));
   }
 
   const candidates = [...srcs].filter(
@@ -117,24 +121,285 @@ export async function inlineLocalImages(
 
   if (dataUris.size === 0) return { markdown: source, failures };
 
-  let out = masked.replace(
-    MD_IMAGE,
-    (whole, alt: string, url: string, title?: string) => {
-      const uri = dataUris.get(cleanSrc(url));
-      return uri ? `![${alt}](${uri}${title ?? ""})` : whole;
-    },
-  );
-  out = out.replace(
-    HTML_IMAGE_SRC,
-    (whole, prefix: string, _quoted: string, dq?: string, sq?: string) => {
-      const uri = dataUris.get(cleanSrc(dq ?? sq ?? ""));
-      if (!uri) return whole;
-      const quote = dq !== undefined ? '"' : "'";
-      return `${prefix}${quote}${uri}${quote}`;
-    },
-  );
-
+  // Markdown replacements first, then a fresh HTML scan of the result —
+  // exactly the two `String.replace` passes this replaces.
+  let out = replaceMatches(masked, markdownMatches, dataUris);
+  out = replaceMatches(out, scanHtmlImages(out), dataUris);
   return { markdown: restore(out), failures };
+}
+
+/** A well-formed image reference found in the masked document. */
+interface ImageMatch {
+  /** Index of the opening `![` or `<img`. */
+  start: number;
+  /** Index one past the reference's final character. */
+  end: number;
+  /** The src token as captured, before `cleanSrc`. */
+  src: string;
+  /** `![alt](…)` only: the alt text and the raw title suffix (may be ""). */
+  markdown?: { alt: string; title: string };
+  /** `<img …>` only: index of the value's opening quote and the quote char. */
+  html?: { quoteStart: number; quote: string };
+}
+
+/** `![alt](src "title")` matches, in document order and in linear time. */
+function scanMarkdownImages(s: string): ImageMatch[] {
+  const matches: ImageMatch[] = [];
+  const runs = new RunMemo();
+  const quotes = new QuoteMemo();
+  const gts = new GtMemo();
+  let cursor = 0;
+  for (;;) {
+    const start = s.indexOf("![", cursor);
+    if (start === -1) break;
+    const altEnd = s.indexOf("]", start + 2);
+    if (altEnd === -1) break;
+    if (s[altEnd + 1] !== "(") {
+      // Every `![` between `start` and this `]` closes its alt here too and
+      // fails identically; resume past the `]` instead of retrying each one.
+      cursor = altEnd + 1;
+      continue;
+    }
+    let k = altEnd + 2;
+    while (k < s.length && isSpace(s[k]!)) k++;
+
+    const match = matchMarkdownSrc(s, start, altEnd, k, runs, quotes, gts);
+    if (match) {
+      matches.push(match);
+      cursor = match.end;
+    } else {
+      // Resume past the alt close: later `![` starts after it get their own
+      // alt close and are parsed normally.
+      cursor = altEnd + 1;
+    }
+  }
+  return matches;
+}
+
+/** Parse the `src "title")` tail of a markdown image opening at `start`. */
+function matchMarkdownSrc(
+  s: string,
+  start: number,
+  altEnd: number,
+  k: number,
+  runs: RunMemo,
+  quotes: QuoteMemo,
+  gts: GtMemo,
+): ImageMatch | null {
+  const alt = s.slice(start + 2, altEnd);
+
+  if (s[k] === "<") {
+    const gt = gts.firstAtOrAfter(s, k + 1);
+    if (gt > k + 1) {
+      const title = coverTitle(s, gt + 1, quotes);
+      if (title !== null) {
+        return {
+          start,
+          end: title.end,
+          src: s.slice(k, gt + 1),
+          markdown: { alt, title: title.text },
+        };
+      }
+    }
+  }
+
+  const t = runs.endOfRun(s, k);
+  if (t > k) {
+    const title = coverTitle(s, t, quotes);
+    if (title !== null) {
+      return {
+        start,
+        end: title.end,
+        src: s.slice(k, t),
+        markdown: { alt, title: title.text },
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse the part after a src: optional whitespace, then either `)` or a
+ * quoted title followed by optional whitespace and `)`. Returns the match
+ * end (one past `)`) and the title suffix as the regex replacement kept it.
+ */
+function coverTitle(
+  s: string,
+  pos: number,
+  quotes: QuoteMemo,
+): { end: number; text: string } | null {
+  let q = pos;
+  while (q < s.length && isSpace(s[q]!)) q++;
+  if (s[q] === ")") return { end: q + 1, text: "" };
+  if (q === pos) return null;
+  const quote = s[q];
+  if (quote !== '"' && quote !== "'") return null;
+  const close = quotes.firstAtOrAfter(s, quote, q + 1);
+  if (close === -1) return null;
+  let r = close + 1;
+  while (r < s.length && isSpace(s[r]!)) r++;
+  if (s[r] !== ")") return null;
+  return { end: r + 1, text: s.slice(pos, close + 1) };
+}
+
+/** `<img … src="…">` matches, in document order and in linear time. */
+function scanHtmlImages(s: string): ImageMatch[] {
+  const matches: ImageMatch[] = [];
+  const gts = new GtMemo();
+  let cursor = 0;
+  for (;;) {
+    const start = indexOfCI(s, "<img", cursor);
+    if (start === -1) break;
+    const after = start + 4;
+    // `\b` after `<img`: `<imgsrc=…` is not a tag.
+    if (after < s.length && isWordChar(s[after]!)) {
+      cursor = start + 1;
+      continue;
+    }
+    const gt = gts.firstAtOrAfter(s, after);
+    const limit = gt === -1 ? s.length : gt;
+
+    let match: ImageMatch | null = null;
+    for (
+      let q = indexOfCI(s, "src", after, limit);
+      q !== -1;
+      q = indexOfCI(s, "src", q + 1, limit)
+    ) {
+      // A single `\b` would also match `data-src=`, whose value the renderer
+      // never uses; embedding it would leave the real src local and the
+      // image dropped. A real attribute name starts after whitespace.
+      if (q === 0 || !isSpace(s[q - 1]!)) continue;
+      let r = q + 3;
+      while (r < s.length && isSpace(s[r]!)) r++;
+      if (s[r] !== "=") continue;
+      r++;
+      while (r < s.length && isSpace(s[r]!)) r++;
+      const quote = s[r];
+      if (quote !== '"' && quote !== "'") continue;
+      const close = s.indexOf(quote, r + 1);
+      if (close === -1) continue;
+      match = {
+        start,
+        end: close + 1,
+        src: s.slice(r + 1, close),
+        html: { quoteStart: r, quote },
+      };
+      break;
+    }
+
+    if (match) {
+      matches.push(match);
+      cursor = match.end;
+    } else {
+      // Every `src` before the tag's `>` was rejected, and a later `<img`
+      // sees a subset of that same text, so resume past the tag (or stop
+      // when it has no `>`: no later tag can close either).
+      cursor = gt === -1 ? s.length : gt + 1;
+    }
+  }
+  return matches;
+}
+
+/** Replace every matched reference whose src resolved, preserving the rest. */
+function replaceMatches(
+  source: string,
+  matches: ImageMatch[],
+  dataUris: Map<string, string>,
+): string {
+  let out = "";
+  let cursor = 0;
+  let changed = false;
+  for (const match of matches) {
+    const uri = dataUris.get(cleanSrc(match.src));
+    if (uri === undefined) continue;
+    out += source.slice(cursor, match.start);
+    if (match.markdown) {
+      out += `![${match.markdown.alt}](${uri}${match.markdown.title})`;
+    } else {
+      const { quoteStart, quote } = match.html!;
+      out += `${source.slice(match.start, quoteStart)}${quote}${uri}${quote}`;
+    }
+    cursor = match.end;
+    changed = true;
+  }
+  return changed ? out + source.slice(cursor) : source;
+}
+
+/**
+ * The end of a plain src run (the first `)` or whitespace at/after `k`),
+ * memoised so a run of failing attempts that start inside the same run is
+ * not rescanned. Queried with non-decreasing `k`.
+ */
+class RunMemo {
+  private k = -1;
+  private t = -1;
+
+  endOfRun(s: string, k: number): number {
+    if (this.k !== -1 && k >= this.k && k <= this.t) return this.t;
+    let t = k;
+    while (t < s.length && s[t] !== ")" && !isSpace(s[t]!)) t++;
+    this.k = k;
+    this.t = t;
+    return t;
+  }
+}
+
+/** The first `>` at or after a position, memoised across failed candidates. */
+class GtMemo {
+  private from = -1;
+  private gt = -1;
+
+  firstAtOrAfter(s: string, from: number): number {
+    if (this.from !== -1 && from >= this.from && (this.gt === -1 || from <= this.gt)) {
+      return this.gt;
+    }
+    this.from = from;
+    this.gt = s.indexOf(">", from);
+    return this.gt;
+  }
+}
+
+/** The first quote character at or after a position, memoised per quote. */
+class QuoteMemo {
+  private readonly quotes = new Map<string, { from: number; index: number }>();
+
+  firstAtOrAfter(s: string, quote: string, from: number): number {
+    const memo = this.quotes.get(quote);
+    if (memo && from >= memo.from && (memo.index === -1 || from <= memo.index)) {
+      return memo.index;
+    }
+    const index = s.indexOf(quote, from);
+    this.quotes.set(quote, { from, index });
+    return index;
+  }
+}
+
+const SPACE = /\s/;
+const WORD = /[A-Za-z0-9_]/;
+
+function isSpace(c: string): boolean {
+  return SPACE.test(c);
+}
+
+function isWordChar(c: string): boolean {
+  return WORD.test(c);
+}
+
+/** Case-insensitive `indexOf`, searching starts in `[from, to - needle.length]`. */
+function indexOfCI(s: string, needle: string, from: number, to = s.length): number {
+  const lower = needle.toLowerCase();
+  const last = Math.min(to, s.length) - lower.length;
+  for (let i = Math.max(0, from); i <= last; i++) {
+    let hit = true;
+    for (let j = 0; j < lower.length; j++) {
+      if (s[i + j]!.toLowerCase() !== lower[j]) {
+        hit = false;
+        break;
+      }
+    }
+    if (hit) return i;
+  }
+  return -1;
 }
 
 const FAILURE_REASON_TEXT: Record<ImageFailureReason, string> = {
