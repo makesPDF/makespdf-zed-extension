@@ -8,7 +8,7 @@ Export the Markdown file you're editing to an accessible, archival-quality PDF (
 
 Zed's extension API has no command palette, event hooks or webviews, so makesPDF ships as a **language server for Markdown** whose code actions do the work:
 
-- **Export to PDF** — posts the current buffer (not the file on disk) to makesPDF and writes the PDF next to the source file, overwriting `<name>.pdf`. Images referenced by a local relative or absolute path are embedded as `data:` URIs first, so they appear in the PDF. A message tells you where it went and how many pages it rendered.
+- **Export to PDF** — posts the current buffer (not the file on disk) to makesPDF and writes the PDF next to the source file, overwriting `<name>.pdf`. Images referenced by a local relative or absolute path are embedded as `data:` URIs first, so they appear in the PDF; if one cannot be embedded, the export stops and names it. A message tells you where it went and how many pages it rendered.
 - **Validate accessibility** — runs the same PDF/UA-1 content checks as the renderer (heading hierarchy, image alt text) without producing a PDF. The summary shows the error and warning counts plus the first few issues; every issue is written to the log.
 - **Report problem** — if an export fails, the error dialog offers **Report problem**, which sends the failure's fingerprints (never your text) to makesPDF.
 
@@ -74,7 +74,7 @@ Your Markdown crosses the network only when you run **Export to PDF** or **Valid
 
 Anonymous renders are not persisted to an account; named renders (with an API key) are stored so you can re-download them. See the [privacy policy](https://makespdf.com/legal/privacy).
 
-**Local images are embedded on export.** An image referenced by a relative path (`![diagram](diagram.png)`) or an absolute path is read and embedded as a `data:` URI before the Markdown is sent, so the service can render it without filesystem access. Files larger than 5MB per image are left as plain references and named in a non-fatal warning; the same warning names references that could not be read. `http(s)` URLs are left for the service to fetch.
+**Local images are embedded on export.** An image referenced by a relative path (`![diagram](diagram.png)`) or an absolute path is read and embedded as a `data:` URI before the Markdown is sent, so the service can render it without filesystem access. If any local image cannot be embedded (the file is missing or unreadable, or larger than 5MB), the export stops without writing a PDF and an error dialog names each failed reference, so you can fix or remove it and export again. `http(s)` URLs are left for the service to fetch.
 
 ## Development
 

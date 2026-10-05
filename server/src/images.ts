@@ -6,7 +6,8 @@
 // mirrors the VS Code plugin's `inlineLocalImages`: remote and `data:` URLs
 // are left alone, code blocks and inline spans are masked so literal
 // image-like text is untouched, and unreadable or oversized files are
-// reported non-fatally and left as references.
+// returned as failures. The caller stops the export on any failure: a PDF
+// that silently lacks an image is worse than no PDF.
 //
 // References are found with left-to-right scans rather than the VS Code
 // plugin's backtracking regexes: the document is arbitrary input, and runs of
@@ -407,21 +408,26 @@ const FAILURE_REASON_TEXT: Record<ImageFailureReason, string> = {
   "too-large": "too large to embed, max 5MB",
 };
 
+/** At most this many failed references are named; the rest are counted. */
+const MAX_NAMED_FAILURES = 10;
+
 /**
- * One non-fatal warning naming the images that were left as references, or
- * `null` when nothing failed. Mirrors the VS Code plugin's notice: at most
- * three names are listed, then an ellipsis.
+ * The error that stops an export when a local image could not be embedded,
+ * or `null` when nothing failed. Names each failed reference (up to
+ * MAX_NAMED_FAILURES) with its reason, so the user can fix or remove it.
  */
-export function formatImageNotice(failures: ImageFailure[]): string | null {
+export function formatImageFailure(failures: ImageFailure[]): string | null {
   if (failures.length === 0) return null;
   const names = failures
-    .slice(0, 3)
+    .slice(0, MAX_NAMED_FAILURES)
     .map((failure) => `${failure.src} (${FAILURE_REASON_TEXT[failure.reason]})`);
-  const ellipsis = failures.length > 3 ? "…" : "";
-  const plural = failures.length === 1 ? "" : "s";
+  const more = failures.length - names.length;
+  const listed = more > 0 ? `${names.join(", ")} and ${more} more` : names.join(", ");
+  const one = failures.length === 1;
   return (
-    `Could not embed ${failures.length} local image${plural}: ` +
-    `${names.join(", ")}${ellipsis}. They were left as-is.`
+    `Export stopped, no PDF was written: ${failures.length} local ` +
+    `image${one ? "" : "s"} could not be embedded: ${listed}. ` +
+    `Fix or remove ${one ? "the reference" : "these references"} and export again.`
   );
 }
 
