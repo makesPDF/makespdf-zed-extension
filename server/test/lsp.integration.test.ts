@@ -246,7 +246,7 @@ test("codeAction offers Export (and Validate only with a token); Export writes t
 test("Export inlines local images as data: URIs while Validate sends the plain reference", async () => {
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7, 7]);
   const dataUri = `data:image/png;base64,${png.toString("base64")}`;
-  const markdown = "# Diagram\n\n![diagram](diagram.png)\n\n![gone](missing.png)\n";
+  const markdown = "# Diagram\n\n![diagram](diagram.png)\n";
   const harness = await startHarness({
     markdown,
     files: { "diagram.png": png },
@@ -274,32 +274,55 @@ test("Export inlines local images as data: URIs while Validate sends the plain r
 
     const render = harness.api.requestsFor("/api/v1/md");
     assert.equal(render.length, 1);
-    assert.equal(
-      render[0]!.json.markdown,
-      `# Diagram\n\n![diagram](${dataUri})\n\n![gone](missing.png)\n`,
-      "the readable image is embedded and the unreadable one stays a reference",
-    );
-
-    // The unreadable image is named in one non-fatal warning; export still
-    // ran and wrote the PDF.
+    assert.equal(render[0]!.json.markdown, `# Diagram\n\n![diagram](${dataUri})\n`);
     assert.deepEqual(
       await readFile(join(harness.dir, "report.pdf")),
       Buffer.from("%PDF-1.4 image mock\n"),
     );
-    const warning = messages(harness.client).find((params) =>
-      /local image/.test(params.message),
-    );
-    assert.ok(warning, "an unreadable image produces a non-fatal warning");
-    assert.equal(warning.type, 2, "the notice is a Warning (2)");
-    assert.match(warning.message, /missing\.png/);
-    assert.match(warning.message, /left as-is/);
-    assert.ok(!warning.message.includes("diagram.png"), "the embedded image is not named");
 
     // Validate checks the Markdown, not the image bytes, so it must not inline.
     await execute(harness, COMMAND_VALIDATE);
     const validate = harness.api.requestsFor("/api/v1/md/validate");
     assert.equal(validate.length, 1);
     assert.equal(validate[0]!.json.markdown, markdown, "Validate posts the buffer verbatim");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("Export stops with a persistent error when a local image cannot be embedded", async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7, 7]);
+  const harness = await startHarness({
+    markdown: "# Diagram\n\n![diagram](diagram.png)\n\n![gone](missing.png)\n",
+    files: { "diagram.png": png },
+    routes: [
+      {
+        path: "/api/v1/md",
+        reply: { status: 200, body: Buffer.from("%PDF-1.4 should not be written\n") },
+      },
+    ],
+  });
+  try {
+    await execute(harness, COMMAND_EXPORT);
+
+    assert.equal(harness.api.requestsFor("/api/v1/md").length, 0, "nothing is sent");
+    await assert.rejects(readFile(join(harness.dir, "report.pdf")), { code: "ENOENT" });
+
+    // A dialog with a button, not a plain notification: Zed auto-dismisses
+    // messages without actions, and this one must stay until read.
+    const dialogs = harness.client.serverRequestsFor("window/showMessageRequest") as any[];
+    assert.equal(dialogs.length, 1);
+    const [dialog] = dialogs;
+    assert.equal(dialog.type, 1, "the dialog is an Error (1)");
+    assert.deepEqual(dialog.actions, [{ title: "Dismiss" }]);
+    assert.match(dialog.message, /no PDF was written/);
+    assert.match(dialog.message, /missing\.png \(could not be read\)/);
+    assert.ok(!dialog.message.includes("diagram.png"), "the embeddable image is not named");
+    assert.equal(
+      messages(harness.client).filter((params) => /local image/.test(params.message)).length,
+      0,
+      "no auto-dismissing notification is sent",
+    );
   } finally {
     await harness.dispose();
   }

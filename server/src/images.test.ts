@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  formatImageNotice,
+  formatImageFailure,
   inlineLocalImages,
   MAX_IMAGE_BYTES,
   type ImageFailure,
@@ -177,29 +177,30 @@ test("mixed outcomes keep document order in failures and rewrite the readable fi
   });
 });
 
-test("formatImageNotice names failures in one non-fatal warning", () => {
-  assert.equal(formatImageNotice([]), null);
+test("formatImageFailure names each failed reference and how to fix it", () => {
+  assert.equal(formatImageFailure([]), null);
   assert.equal(
-    formatImageNotice([{ src: "missing.png", reason: "unreadable" }]),
-    "Could not embed 1 local image: missing.png (could not be read). They were left as-is.",
+    formatImageFailure([{ src: "missing.png", reason: "unreadable" }]),
+    "Export stopped, no PDF was written: 1 local image could not be embedded: " +
+      "missing.png (could not be read). Fix or remove the reference and export again.",
   );
   assert.equal(
-    formatImageNotice([
+    formatImageFailure([
       { src: "missing.png", reason: "unreadable" },
       { src: "big.png", reason: "too-large" },
     ]),
-    "Could not embed 2 local images: missing.png (could not be read), " +
-      "big.png (too large to embed, max 5MB). They were left as-is.",
+    "Export stopped, no PDF was written: 2 local images could not be embedded: " +
+      "missing.png (could not be read), big.png (too large to embed, max 5MB). " +
+      "Fix or remove these references and export again.",
   );
-  const many: ImageFailure[] = ["a.png", "b.png", "c.png", "d.png"].map((src) => ({
-    src,
+  const many: ImageFailure[] = Array.from({ length: 12 }, (_, i) => ({
+    src: `${i}.png`,
     reason: "unreadable",
   }));
-  assert.equal(
-    formatImageNotice(many),
-    "Could not embed 4 local images: a.png (could not be read), " +
-      "b.png (could not be read), c.png (could not be read)…. They were left as-is.",
-  );
+  const message = formatImageFailure(many)!;
+  assert.match(message, /^Export stopped, no PDF was written: 12 local images/);
+  assert.match(message, /9\.png \(could not be read\) and 2 more\./);
+  assert.ok(!message.includes("10.png"), "names past the tenth are counted, not listed");
 });
 
 test("failures across markdown and HTML references keep document order", async () => {

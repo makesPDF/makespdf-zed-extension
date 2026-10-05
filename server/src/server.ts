@@ -46,7 +46,7 @@ import {
   sendFeedback,
   type RenderFailureFacts,
 } from "./feedback.ts";
-import { formatImageNotice, inlineLocalImages } from "./images.ts";
+import { formatImageFailure, inlineLocalImages } from "./images.ts";
 import { fileDir, isFileUri, pdfTarget } from "./paths.ts";
 import {
   DEFAULT_SETTINGS,
@@ -57,6 +57,7 @@ import {
 import { SERVER_VERSION } from "./version.ts";
 
 const REPORT_PROBLEM = "Report problem";
+const DISMISS = "Dismiss";
 const ISSUES_URL = "https://github.com/makesPDF/makespdf-zed-extension/issues";
 const REQUEST_TIMEOUT_MS = 120_000;
 
@@ -71,8 +72,9 @@ let anonymousTipShown = false;
 let withheldTokenWarned = false;
 
 // Plain `window/showMessage` notifications for outcomes with nothing to click.
-// (`connection.window.showInformationMessage` would send a showMessageRequest,
-// which the task reserves for the "Report problem" action.)
+// Zed auto-dismisses these after a few seconds, so a message the user must
+// act on goes through `connection.window.show*Message` with a button instead
+// (a showMessageRequest, which stays until dismissed).
 function showMessage(type: MessageType, message: string): void {
   void connection.sendNotification(ShowMessageNotification.type, { type, message });
 }
@@ -211,8 +213,14 @@ async function exportToPdf(uri: string): Promise<void> {
     markdown,
     fileDir(uri),
   );
-  const imageNotice = formatImageNotice(failures);
-  if (imageNotice) showWarning(`makesPDF: ${imageNotice}`);
+  // A missing image would otherwise leave a PDF that looks finished but is
+  // not, so the export stops. The error carries a button because Zed
+  // auto-dismisses any message without one, and this one must not be missed.
+  const imageFailure = formatImageFailure(failures);
+  if (imageFailure) {
+    await connection.window.showErrorMessage(`makesPDF: ${imageFailure}`, { title: DISMISS });
+    return;
+  }
 
   const { title, pdfPath } = pdfTarget(uri);
   const options = optionsFromSettings(settings, title);
