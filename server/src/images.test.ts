@@ -254,3 +254,103 @@ test("pathological runs of unterminated references are scanned in linear time", 
     }
   });
 });
+
+test("paths with balanced, nested or escaped parentheses are inlined", async () => {
+  await withDir(
+    { "a(b).png": PNG, "c (d).png": PNG, "u(v.png": PNG, "a((b)).png": PNG },
+    async (dir) => {
+      const source = [
+        "![x](a(b).png)",
+        "![x](a\\(b\\).png)",
+        "![x](c%20(d).png)",
+        "![x](<c (d).png>)",
+        "![x](u(v.png)",
+        "![x](a((b)).png)",
+        '![x](a(b).png "title")',
+        "![x]( a(b).png )",
+      ].join("\n");
+      const result = await inlineLocalImages(source, dir);
+      assert.deepEqual(result.failures, []);
+      assert.equal(
+        result.markdown,
+        [
+          `![x](${PNG_URI})`,
+          `![x](${PNG_URI})`,
+          `![x](${PNG_URI})`,
+          `![x](${PNG_URI})`,
+          `![x](${PNG_URI})`,
+          `![x](${PNG_URI})`,
+          `![x](${PNG_URI} "title")`,
+          `![x](${PNG_URI})`,
+        ].join("\n"),
+      );
+    },
+  );
+});
+
+test("text after an image with parentheses in its path is untouched", async () => {
+  await withDir({ "a(b).png": PNG, "u(v.png": PNG }, async (dir) => {
+    const source = "![x](a(b).png) and (this) stays.\n![y](u(v.png) then text)\n";
+    const result = await inlineLocalImages(source, dir);
+    assert.deepEqual(result.failures, []);
+    assert.equal(
+      result.markdown,
+      `![x](${PNG_URI}) and (this) stays.\n![y](${PNG_URI}) then text)\n`,
+    );
+  });
+});
+
+test("a missing file with parentheses in its path is reported by its full name", async () => {
+  await withDir({}, async (dir) => {
+    const source = "![x](missing(1).png)\n![y](gone\\(2\\).png)\n";
+    const result = await inlineLocalImages(source, dir);
+    assert.equal(result.markdown, source);
+    assert.deepEqual(result.failures, [
+      { src: "missing(1).png", reason: "unreadable" },
+      { src: "gone(2).png", reason: "unreadable" },
+    ]);
+    assert.match(formatImageFailure(result.failures)!, /missing\(1\)\.png \(could not be read\)/);
+  });
+});
+
+test("before a title, an open parenthesis takes the next ) into the path, as the server reads it", async () => {
+  await withDir({ "u(v.png": PNG }, async (dir) => {
+    // The path reads `u(v.png)`, whose extension `.png)` is not an image's,
+    // so the reference is left for the server, which reads the same path.
+    const source = '![a](u(v.png) "t")';
+    const result = await inlineLocalImages(source, dir);
+    assert.deepEqual(result.failures, []);
+    assert.equal(result.markdown, source);
+  });
+});
+
+test("backslashes inside <...> and before other characters stay in the path", async () => {
+  await withDir({}, async (dir) => {
+    const result = await inlineLocalImages("![a](<pics\\(1).png>)\n![b](dir\\x(1).png)\n", dir);
+    assert.deepEqual(
+      result.failures.map((failure) => failure.src),
+      ["pics\\(1).png", "dir\\x(1).png"],
+    );
+  });
+});
+
+test("unbalanced and deeply nested parentheses are scanned in linear time", async () => {
+  await withDir({}, async (dir) => {
+    const sources = [
+      "![a](x(".repeat(200_000),
+      "![a](\\(".repeat(200_000),
+      "![a](()".repeat(200_000),
+      `![a](${"(".repeat(1_000_000)}`,
+      `![a](${"(".repeat(500_000)}${")".repeat(500_000)}`,
+      `![a](${"(a)".repeat(300_000)} y`,
+    ];
+    for (const source of sources) {
+      const started = performance.now();
+      const result = await inlineLocalImages(source, dir);
+      const elapsed = performance.now() - started;
+      assert.equal(result.markdown, source, "nothing is rewritten");
+      assert.deepEqual(result.failures, []);
+      assert.ok(elapsed < 2_000, `scanning ${source.length} chars took ${elapsed}ms`);
+    }
+  });
+});

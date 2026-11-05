@@ -16,6 +16,12 @@
 // language server. The scans memoise the delimiter lookups they would
 // otherwise repeat, so they stay linear while still finding every reference
 // the regexes found, including references nested inside malformed ones.
+//
+// A bare destination may contain balanced or backslash-escaped parentheses
+// (`![x](a(b).png)`, `![x](a\(b\).png)`), as CommonMark and the service's
+// parser allow, so the scan matches parentheses rather than stopping at the
+// first `)`. The matching is done once per whitespace-free run of text and
+// reused by every attempt that starts inside it, which keeps it linear too.
 
 import { readFile, stat } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
@@ -45,7 +51,11 @@ export const IMAGE_MIME_BY_EXT: Record<string, string> = {
 export type ImageFailureReason = "unreadable" | "too-large";
 
 export interface ImageFailure {
-  /** The reference as written, minus `<…>` brackets and surrounding space. */
+  /**
+   * The path as read from disk, before percent-decoding: the reference minus
+   * `<…>` brackets and surrounding space, and for a markdown reference outside
+   * brackets, minus the backslash in `\(`, `\)`, `\<` and `\>`.
+   */
   src: string;
   reason: ImageFailureReason;
 }
@@ -78,7 +88,7 @@ export async function inlineLocalImages(
 
   const srcs = new Set<string>();
   for (const match of [...markdownMatches, ...htmlMatches].sort((a, b) => a.start - b.start)) {
-    srcs.add(cleanSrc(match.src));
+    srcs.add(match.key);
   }
 
   const candidates = [...srcs].filter(
@@ -135,8 +145,10 @@ interface ImageMatch {
   start: number;
   /** Index one past the reference's final character. */
   end: number;
-  /** The src token as captured, before `cleanSrc`. */
+  /** The src token as captured. */
   src: string;
+  /** The src as a path: `cleanSrc`, plus `unescapeMarkdownSrc` for markdown. */
+  key: string;
   /** `![alt](…)` only: the alt text and the raw title suffix (may be ""). */
   markdown?: { alt: string; title: string };
   /** `<img …>` only: index of the value's opening quote and the quote char. */
@@ -147,6 +159,7 @@ interface ImageMatch {
 function scanMarkdownImages(s: string): ImageMatch[] {
   const matches: ImageMatch[] = [];
   const runs = new RunMemo();
+  const parens = new ParenMemo();
   const quotes = new QuoteMemo();
   const gts = new GtMemo();
   let cursor = 0;
@@ -164,7 +177,7 @@ function scanMarkdownImages(s: string): ImageMatch[] {
     let k = altEnd + 2;
     while (k < s.length && isSpace(s[k]!)) k++;
 
-    const match = matchMarkdownSrc(s, start, altEnd, k, runs, quotes, gts);
+    const match = matchMarkdownSrc(s, start, altEnd, k, runs, parens, quotes, gts);
     if (match) {
       matches.push(match);
       cursor = match.end;
@@ -184,39 +197,30 @@ function matchMarkdownSrc(
   altEnd: number,
   k: number,
   runs: RunMemo,
+  parens: ParenMemo,
   quotes: QuoteMemo,
   gts: GtMemo,
 ): ImageMatch | null {
   const alt = s.slice(start + 2, altEnd);
+  const at = (srcEnd: number, bare: boolean): ImageMatch | null => {
+    if (srcEnd <= k) return null;
+    const title = coverTitle(s, srcEnd, quotes);
+    if (title === null) return null;
+    const src = s.slice(k, srcEnd);
+    const key = bare ? unescapeMarkdownSrc(cleanSrc(src)) : cleanSrc(src);
+    return { start, end: title.end, src, key, markdown: { alt, title: title.text } };
+  };
 
   if (s[k] === "<") {
     const gt = gts.firstAtOrAfter(s, k + 1);
-    if (gt > k + 1) {
-      const title = coverTitle(s, gt + 1, quotes);
-      if (title !== null) {
-        return {
-          start,
-          end: title.end,
-          src: s.slice(k, gt + 1),
-          markdown: { alt, title: title.text },
-        };
-      }
-    }
+    const match = gt > k + 1 ? at(gt + 1, false) : null;
+    if (match) return match;
   }
 
-  const t = runs.endOfRun(s, k);
-  if (t > k) {
-    const title = coverTitle(s, t, quotes);
-    if (title !== null) {
-      return {
-        start,
-        end: title.end,
-        src: s.slice(k, t),
-        markdown: { alt, title: title.text },
-      };
-    }
-  }
-  return null;
+  // A destination with balanced or escaped parentheses, `a(b).png`. When
+  // that does not close the reference, fall back to the run up to the first
+  // `)`, so `![x](u(v.png)` still reads `u(v.png`, as the old scan did.
+  return at(parens.endOfDestination(s, k), true) ?? at(runs.endOfRun(s, k), true);
 }
 
 /**
@@ -279,10 +283,12 @@ function scanHtmlImages(s: string): ImageMatch[] {
       if (quote !== '"' && quote !== "'") continue;
       const close = s.indexOf(quote, r + 1);
       if (close === -1) continue;
+      const src = s.slice(r + 1, close);
       match = {
         start,
         end: close + 1,
-        src: s.slice(r + 1, close),
+        src,
+        key: cleanSrc(src),
         html: { quoteStart: r, quote },
       };
       break;
@@ -311,7 +317,7 @@ function replaceMatches(
   let cursor = 0;
   let changed = false;
   for (const match of matches) {
-    const uri = dataUris.get(cleanSrc(match.src));
+    const uri = dataUris.get(match.key);
     if (uri === undefined) continue;
     out += source.slice(cursor, match.start);
     if (match.markdown) {
@@ -342,6 +348,72 @@ class RunMemo {
     this.k = k;
     this.t = t;
     return t;
+  }
+}
+
+/**
+ * Where a bare destination starting at `k` ends when its parentheses must
+ * balance: at the `)` that closes the `(` before `k` (the one in `](`), or
+ * at the next whitespace or the end of the text when that `(` is the last
+ * one left open. Returns -1 when another `(` is still open there, which is
+ * not a destination. A backslash escapes the character after it, so `\(`
+ * and `\)` do not count.
+ *
+ * Each whitespace-free run is matched once, the first time an attempt starts
+ * inside it, and the result serves every later attempt in the same run.
+ * Attempts are queried with non-decreasing `k`, so the runs matched never
+ * overlap and the total work is linear in the text.
+ */
+class ParenMemo {
+  /** Index of the first character of the matched run, and one past its end. */
+  private from = -1;
+  private end = -1;
+  /** Positions of each `(` in the run, and of its closing `)` or -1. */
+  private opens: number[] = [];
+  private closes: number[] = [];
+  /** The last `(` in the run that nothing closes, or -1. */
+  private lastOpen = -1;
+  /** Index into `opens` of the previous query, which only moves forward. */
+  private i = 0;
+
+  endOfDestination(s: string, k: number): number {
+    const open = k - 1;
+    // `k` follows `](` plus optional whitespace. After whitespace the
+    // destination starts a new run, and the whitespace stands in for the `(`.
+    if (s[open] !== "(" || open < this.from || open >= this.end) this.match(s, open);
+    while (this.i < this.opens.length && this.opens[this.i]! < open) this.i++;
+    if (this.opens[this.i] !== open) return -1;
+    const close = this.closes[this.i]!;
+    if (close !== -1) return close;
+    return this.lastOpen === open ? this.end : -1;
+  }
+
+  /** Match the parentheses of the run that starts with the opener at `open`. */
+  private match(s: string, open: number): void {
+    this.from = open;
+    this.opens = [open];
+    this.closes = [-1];
+    this.i = 0;
+    const stack = [0];
+    let t = open + 1;
+    while (t < s.length) {
+      const c = s[t]!;
+      if (isSpace(c)) break;
+      if (c === "\\" && t + 1 < s.length && !isSpace(s[t + 1]!)) {
+        t += 2;
+        continue;
+      }
+      if (c === "(") {
+        stack.push(this.opens.length);
+        this.opens.push(t);
+        this.closes.push(-1);
+      } else if (c === ")" && stack.length > 0) {
+        this.closes[stack.pop()!] = t;
+      }
+      t++;
+    }
+    this.end = t;
+    this.lastOpen = stack.length > 0 ? this.opens[stack[stack.length - 1]!]! : -1;
   }
 }
 
@@ -435,6 +507,16 @@ export function formatImageFailure(failures: ImageFailure[]): string | null {
 function cleanSrc(raw: string): string {
   const s = raw.trim();
   return s.startsWith("<") && s.endsWith(">") ? s.slice(1, -1).trim() : s;
+}
+
+/**
+ * Undo the backslash escapes a bare markdown destination needs for `(`, `)`,
+ * `<` and `>`, so `a\(b\).png` reads `a(b).png` from disk. Other
+ * backslashes stay: they are Windows path separators (`C:\img\x.png`).
+ * A path inside `<…>` needs no escapes and is left as written.
+ */
+function unescapeMarkdownSrc(src: string): string {
+  return src.replace(/\\([()<>])/g, "$1");
 }
 
 /**
