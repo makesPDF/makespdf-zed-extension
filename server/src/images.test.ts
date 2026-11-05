@@ -343,6 +343,12 @@ test("unbalanced and deeply nested parentheses are scanned in linear time", asyn
       `![a](${"(".repeat(1_000_000)}`,
       `![a](${"(".repeat(500_000)}${")".repeat(500_000)}`,
       `![a](${"(a)".repeat(300_000)} y`,
+      // Each failed attempt ends at the same whitespace block.
+      `${"![a](x".repeat(100_000)}${" ".repeat(100_000)}y`,
+      `${"![a](".repeat(100_000)}${" ".repeat(100_000)}y`,
+      `${"![a](x(".repeat(100_000)}${" ".repeat(100_000)}y`,
+      `${"![a](x".repeat(1_000)}${" ".repeat(500_000)}y`,
+      `${'![a](x "t"'.repeat(100_000)}${" ".repeat(100_000)}y`,
     ];
     for (const source of sources) {
       const started = performance.now();
@@ -352,5 +358,13 @@ test("unbalanced and deeply nested parentheses are scanned in linear time", asyn
       assert.deepEqual(result.failures, []);
       assert.ok(elapsed < 2_000, `scanning ${source.length} chars took ${elapsed}ms`);
     }
+  });
+});
+
+test("adjacent images with parentheses in one run of text are both inlined", async () => {
+  await withDir({ "a(b).png": PNG, "c(d).png": PNG }, async (dir) => {
+    const result = await inlineLocalImages("![a](a(b).png)![b](c(d).png)x(![c](a(b).png))", dir);
+    assert.deepEqual(result.failures, []);
+    assert.equal(result.markdown, `![a](${PNG_URI})![b](${PNG_URI})x(![c](${PNG_URI}))`);
   });
 });

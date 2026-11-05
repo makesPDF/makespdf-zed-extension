@@ -162,6 +162,7 @@ function scanMarkdownImages(s: string): ImageMatch[] {
   const parens = new ParenMemo();
   const quotes = new QuoteMemo();
   const gts = new GtMemo();
+  const spaces = new SpaceMemo();
   let cursor = 0;
   for (;;) {
     const start = s.indexOf("![", cursor);
@@ -177,7 +178,7 @@ function scanMarkdownImages(s: string): ImageMatch[] {
     let k = altEnd + 2;
     while (k < s.length && isSpace(s[k]!)) k++;
 
-    const match = matchMarkdownSrc(s, start, altEnd, k, runs, parens, quotes, gts);
+    const match = matchMarkdownSrc(s, start, altEnd, k, runs, parens, quotes, gts, spaces);
     if (match) {
       matches.push(match);
       cursor = match.end;
@@ -200,11 +201,12 @@ function matchMarkdownSrc(
   parens: ParenMemo,
   quotes: QuoteMemo,
   gts: GtMemo,
+  spaces: SpaceMemo,
 ): ImageMatch | null {
   const alt = s.slice(start + 2, altEnd);
   const at = (srcEnd: number, bare: boolean): ImageMatch | null => {
     if (srcEnd <= k) return null;
-    const title = coverTitle(s, srcEnd, quotes);
+    const title = coverTitle(s, srcEnd, quotes, spaces);
     if (title === null) return null;
     const src = s.slice(k, srcEnd);
     const key = bare ? unescapeMarkdownSrc(cleanSrc(src)) : cleanSrc(src);
@@ -232,17 +234,16 @@ function coverTitle(
   s: string,
   pos: number,
   quotes: QuoteMemo,
+  spaces: SpaceMemo,
 ): { end: number; text: string } | null {
-  let q = pos;
-  while (q < s.length && isSpace(s[q]!)) q++;
+  const q = spaces.skip(s, pos);
   if (s[q] === ")") return { end: q + 1, text: "" };
   if (q === pos) return null;
   const quote = s[q];
   if (quote !== '"' && quote !== "'") return null;
   const close = quotes.firstAtOrAfter(s, quote, q + 1);
   if (close === -1) return null;
-  let r = close + 1;
-  while (r < s.length && isSpace(s[r]!)) r++;
+  const r = spaces.skip(s, close + 1);
   if (s[r] !== ")") return null;
   return { end: r + 1, text: s.slice(pos, close + 1) };
 }
@@ -368,7 +369,11 @@ class ParenMemo {
   /** Index of the first character of the matched run, and one past its end. */
   private from = -1;
   private end = -1;
-  /** Positions of each `(` in the run, and of its closing `)` or -1. */
+  /**
+   * Positions of each `(` in the run that follows a `]` (the only ones ever
+   * queried), and of its closing `)` or -1. Other parentheses are only
+   * counted, so a long run of them costs no memory.
+   */
   private opens: number[] = [];
   private closes: number[] = [];
   /** The last `(` in the run that nothing closes, or -1. */
@@ -394,7 +399,11 @@ class ParenMemo {
     this.opens = [open];
     this.closes = [-1];
     this.i = 0;
+    // Recorded openers still open, as indexes into `opens`, with the nesting
+    // depth each one opened at. `depth` counts every open `(`.
     const stack = [0];
+    const depths = [1];
+    let depth = 1;
     let t = open + 1;
     while (t < s.length) {
       const c = s[t]!;
@@ -404,16 +413,47 @@ class ParenMemo {
         continue;
       }
       if (c === "(") {
-        stack.push(this.opens.length);
-        this.opens.push(t);
-        this.closes.push(-1);
-      } else if (c === ")" && stack.length > 0) {
-        this.closes[stack.pop()!] = t;
+        depth++;
+        if (s[t - 1] === "]") {
+          stack.push(this.opens.length);
+          depths.push(depth);
+          this.opens.push(t);
+          this.closes.push(-1);
+        }
+      } else if (c === ")" && depth > 0) {
+        if (depths[depths.length - 1] === depth) {
+          this.closes[stack.pop()!] = t;
+          depths.pop();
+        }
+        depth--;
       }
       t++;
     }
     this.end = t;
-    this.lastOpen = stack.length > 0 ? this.opens[stack[stack.length - 1]!]! : -1;
+    // The last opener nothing closes is the innermost one still open, and
+    // only if it is recorded: an unrecorded `(` opened after it.
+    this.lastOpen =
+      depth > 0 && depths[depths.length - 1] === depth ? this.opens[stack[stack.length - 1]!]! : -1;
+  }
+}
+
+/**
+ * The first non-whitespace index at or after a position. A failed attempt
+ * and every later one whose src ends at the same whitespace block would each
+ * skip the whole block again, so skips are memoised by their start. Only a
+ * skip that starts on whitespace is stored: the rest cost nothing.
+ */
+class SpaceMemo {
+  private readonly ends = new Map<number, number>();
+
+  skip(s: string, pos: number): number {
+    if (pos >= s.length || !isSpace(s[pos]!)) return pos;
+    const known = this.ends.get(pos);
+    if (known !== undefined) return known;
+    let q = pos + 1;
+    while (q < s.length && isSpace(s[q]!)) q++;
+    this.ends.set(pos, q);
+    return q;
   }
 }
 
@@ -513,6 +553,8 @@ function cleanSrc(raw: string): string {
  * Undo the backslash escapes a bare markdown destination needs for `(`, `)`,
  * `<` and `>`, so `a\(b\).png` reads `a(b).png` from disk. Other
  * backslashes stay: they are Windows path separators (`C:\img\x.png`).
+ * A Windows folder separator directly before `(`, `)`, `<` or `>` is read as
+ * an escape, so `C:\pics\(1).png` must be written `<C:\pics\(1).png>`.
  * A path inside `<…>` needs no escapes and is left as written.
  */
 function unescapeMarkdownSrc(src: string): string {
